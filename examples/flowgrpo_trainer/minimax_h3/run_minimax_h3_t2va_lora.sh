@@ -3,6 +3,7 @@
 set -x
 
 export WANDB_MODE=${WANDB_MODE:-online}
+export VERL_OMNI_AUTO_IMPORT_PIPELINES=${VERL_OMNI_AUTO_IMPORT_PIPELINES:-minimax_h3_diffusion_nft,minimax_h3_flow_grpo}
 
 WORKSPACE=${WORKSPACE:-$HOME}
 MODEL_PATH=${MODEL_PATH:-$WORKSPACE/models/MiniMax-H3/FL2VA}
