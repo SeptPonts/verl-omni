@@ -233,9 +233,9 @@ def run_actor_gate(work_dir: Path) -> None:
     device_api = get_torch_device()
     device_api.set_device(local_rank)
     collective_backend = get_nccl_backend()
-    dist.init_process_group(backend=collective_backend)
     device_name = get_device_name()
     device = torch.device(f"{device_name}:{local_rank}")
+    dist.init_process_group(backend=collective_backend, device_id=device)
 
     transformer_dir = save_tiny_h3_checkpoint(work_dir, rank)
     actor_config = build_actor_config(work_dir, transformer_dir, world_size)
