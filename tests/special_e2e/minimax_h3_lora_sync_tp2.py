@@ -21,6 +21,7 @@ import torch.nn as nn
 from diffusers import MiniMaxH3Transformer3DModel
 from peft import LoraConfig
 from peft.utils.save_and_load import get_peft_model_state_dict
+from verl.utils.device import get_device_name, get_torch_device
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed import (
     destroy_distributed_environment,
@@ -142,13 +143,14 @@ def main() -> None:
     rank = int(os.environ["RANK"])
     local_rank = int(os.environ["LOCAL_RANK"])
     tp_size = int(os.environ["WORLD_SIZE"])
-    torch.cuda.set_device(local_rank)
+    device_name = get_device_name()
+    get_torch_device().set_device(local_rank)
 
     with set_current_vllm_config(VllmConfig()):
         init_distributed_environment(local_rank=local_rank)
         initialize_model_parallel(tensor_model_parallel_size=tp_size)
         try:
-            device = torch.device(f"cuda:{local_rank}")
+            device = torch.device(f"{device_name}:{local_rank}")
             od_config = OmniDiffusionConfig(
                 model="tiny-minimax-h3-lora-regression",
                 tf_model_config=_vllm_transformer_config(),
