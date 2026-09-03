@@ -256,6 +256,103 @@ def test_diffusion_strategy_preserves_engine_argument_preparation(monkeypatch):
     }
 
 
+def legacy_mlu_h3_server():
+    """Build the exact supported legacy MLU H3 rollout contract."""
+    return SimpleNamespace(
+        config=SimpleNamespace(
+            load_format="safetensors",
+            enable_sleep_mode=False,
+            free_cache_engine=False,
+            layered_summon=False,
+            engine_kwargs={
+                "vllm_omni": {
+                    "enable_cpu_offload": False,
+                    "enable_layerwise_offload": False,
+                }
+            },
+        ),
+        model_config=SimpleNamespace(
+            architecture="MiniMaxH3Pipeline",
+            algorithm="flow_grpo",
+            lora_rank=64,
+            lora={"merge": False},
+        ),
+    )
+
+
+def activate_legacy_mlu_contract(monkeypatch):
+    """Make validation exercise the legacy vLLM-Omni MLU branch."""
+    monkeypatch.setattr(diffusion_strategy_module, "get_device_name", lambda: "mlu")
+    monkeypatch.setattr(diffusion_strategy_module.vllm_omni, "__version__", "0.25.0")
+
+
+def test_legacy_mlu_h3_accepts_the_supported_contract(monkeypatch):
+    """The LoRA+safetensors+no-lifecycle contract must pass unchanged."""
+    activate_legacy_mlu_contract(monkeypatch)
+    DiffusionStrategy(legacy_mlu_h3_server()).validate_configs()
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("load_format", "dummy", "load_format must be safetensors"),
+        ("enable_sleep_mode", True, "enable_sleep_mode must be false"),
+        ("free_cache_engine", True, "free_cache_engine must be false"),
+        ("layered_summon", True, "layered_summon must be false"),
+    ],
+)
+def test_legacy_mlu_h3_rejects_rollout_lifecycle_options(monkeypatch, field, value, message):
+    """Unsupported load, sleep, cache and summon paths must fail at startup."""
+    activate_legacy_mlu_contract(monkeypatch)
+    server = legacy_mlu_h3_server()
+    setattr(server.config, field, value)
+
+    with pytest.raises(ValueError, match=message):
+        DiffusionStrategy(server).validate_configs()
+
+
+@pytest.mark.parametrize("option", ["enable_cpu_offload", "enable_layerwise_offload"])
+def test_legacy_mlu_h3_rejects_diffusion_offload(monkeypatch, option):
+    """Legacy H3 must reject both vLLM-Omni diffusion offload modes."""
+    activate_legacy_mlu_contract(monkeypatch)
+    server = legacy_mlu_h3_server()
+    server.config.engine_kwargs["vllm_omni"][option] = True
+
+    with pytest.raises(ValueError, match=option):
+        DiffusionStrategy(server).validate_configs()
+
+
+@pytest.mark.parametrize(
+    ("lora_rank", "merge", "message"),
+    [
+        (0, False, "lora_rank must be positive"),
+        (64, True, "lora.merge must be false"),
+    ],
+)
+def test_legacy_mlu_h3_rejects_full_or_merged_weight_sync(monkeypatch, lora_rank, merge, message):
+    """The 0.25 candidate must never enter full-weight or merged-LoRA sync."""
+    activate_legacy_mlu_contract(monkeypatch)
+    server = legacy_mlu_h3_server()
+    server.model_config.lora_rank = lora_rank
+    server.model_config.lora["merge"] = merge
+
+    with pytest.raises(ValueError, match=message):
+        DiffusionStrategy(server).validate_configs()
+
+
+def test_newer_or_non_mlu_backends_keep_their_existing_contract(monkeypatch):
+    """The compatibility guard must not restrict CUDA/NPU or vLLM-Omni 0.27."""
+    server = legacy_mlu_h3_server()
+    server.config.load_format = "dummy"
+
+    monkeypatch.setattr(diffusion_strategy_module, "get_device_name", lambda: "cuda")
+    DiffusionStrategy(server).validate_configs()
+
+    monkeypatch.setattr(diffusion_strategy_module, "get_device_name", lambda: "mlu")
+    monkeypatch.setattr(diffusion_strategy_module.vllm_omni, "__version__", "0.27.0")
+    DiffusionStrategy(server).validate_configs()
+
+
 def test_diffusion_strategy_preserves_multistage_prompt_shape():
     server = SimpleNamespace(engine=SimpleNamespace(default_sampling_params_list=["ar-stage", "diffusion-stage"]))
     strategy = DiffusionStrategy(server)

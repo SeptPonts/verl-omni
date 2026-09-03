@@ -133,3 +133,24 @@ def test_empty_output_uses_modality_dtype(diffusion_strategy, sampling_params, e
 
     assert output.diffusion_output.dtype == expected_dtype
     assert output.diffusion_output.numel() == 0
+    assert output.stop_reason == "aborted"
+
+
+@pytest.mark.parametrize(
+    "request_output",
+    [
+        SimpleNamespace(finish_reason="abort"),
+        SimpleNamespace(outputs=[SimpleNamespace(finish_reason="abort")]),
+    ],
+    ids=["direct_finish_reason", "completion_finish_reason"],
+)
+def test_empty_result_envelope_preserves_abort_reason(diffusion_strategy, request_output):
+    """Both legacy and current empty envelopes must become an aborted rollout."""
+    final_res = SimpleNamespace(images=[], request_output=request_output)
+
+    output = diffusion_strategy.process_output(final_res, params=None, sampling_params={})
+
+    assert output.stop_reason == "aborted"
+    assert output.diffusion_output.dtype == torch.uint8
+    assert output.diffusion_output.numel() == 0
+    assert output.extra_fields == {"global_steps": 0}

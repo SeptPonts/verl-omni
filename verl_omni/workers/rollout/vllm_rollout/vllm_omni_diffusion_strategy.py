@@ -19,6 +19,9 @@ from typing import Any, Optional
 import numpy as np
 import torch
 import torchvision.transforms as T
+import vllm_omni
+from packaging import version
+from verl.utils.device import get_device_name
 from verl.utils.import_utils import import_external_libs
 from vllm_omni.inputs.data import OmniCustomPrompt, OmniDiffusionSamplingParams
 from vllm_omni.lora.request import LoRARequest
@@ -94,6 +97,41 @@ class DiffusionStrategy(OmniStrategyBase):
 
     def post_init(self, cuda_visible_devices: str) -> None:
         self.server._to_tensor = T.PILToTensor()
+
+    def validate_configs(self) -> None:
+        """Reject unsupported legacy MLU H3 lifecycle and weight-sync paths."""
+        model_config = self.server.model_config
+        if (
+            get_device_name() != "mlu"
+            or model_config.architecture != "MiniMaxH3Pipeline"
+            or model_config.algorithm != "flow_grpo"
+            or version.parse(vllm_omni.__version__) >= version.parse("0.27")
+        ):
+            return
+
+        config = self.server.config
+        omni_kwargs = config.engine_kwargs.get("vllm_omni", {})
+        violations = []
+        if model_config.lora_rank <= 0:
+            violations.append("model.lora_rank must be positive")
+        if model_config.lora.get("merge", False):
+            violations.append("model.lora.merge must be false")
+        if config.load_format != "safetensors":
+            violations.append("rollout.load_format must be safetensors")
+        if config.enable_sleep_mode:
+            violations.append("rollout.enable_sleep_mode must be false")
+        if config.free_cache_engine:
+            violations.append("rollout.free_cache_engine must be false")
+        if config.layered_summon:
+            violations.append("rollout.layered_summon must be false")
+        for option in ("enable_cpu_offload", "enable_layerwise_offload"):
+            if omni_kwargs.get(option, False):
+                violations.append(f"rollout.engine_kwargs.vllm_omni.{option} must be false")
+        if violations:
+            raise ValueError(
+                "Legacy vLLM-Omni MLU MiniMax-H3 FlowGRPO supports only LoRA + safetensors + "
+                "no-sleep/no-DLO: " + "; ".join(violations)
+            )
 
     def worker_extension_cls(self, device_type: str) -> str:
         if device_type == "npu":
