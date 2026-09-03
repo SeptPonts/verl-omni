@@ -21,7 +21,7 @@ import torch.nn as nn
 from diffusers import MiniMaxH3Transformer3DModel
 from peft import LoraConfig
 from peft.utils.save_and_load import get_peft_model_state_dict
-from verl.utils.device import get_device_name, get_torch_device
+from verl.utils.device import get_device_name, get_nccl_backend, get_torch_device
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed import (
     destroy_distributed_environment,
@@ -147,7 +147,7 @@ def main() -> None:
     get_torch_device().set_device(local_rank)
 
     with set_current_vllm_config(VllmConfig()):
-        init_distributed_environment(local_rank=local_rank)
+        init_distributed_environment(local_rank=local_rank, backend=get_nccl_backend())
         initialize_model_parallel(tensor_model_parallel_size=tp_size)
         try:
             device = torch.device(f"{device_name}:{local_rank}")
