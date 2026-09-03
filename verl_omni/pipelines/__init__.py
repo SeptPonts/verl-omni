@@ -12,51 +12,36 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from . import (
-    bagel_flow_grpo,
-    boogu_image_flow_grpo,
-    ltx2_flow_grpo,
-    minimax_h3_diffusion_nft,
-    minimax_h3_flow_grpo,
-    qwen3_omni,
-    qwen_image_diffusion_nft,
-    qwen_image_dpo,
-    qwen_image_dual_grpo,
-    qwen_image_edit_flow_grpo,
-    qwen_image_flow_grpo,
-    qwen_image_mix_grpo,
-    sd3_dpo,
-    sd3_flow_grpo,
-    wan22_dance_grpo,
-)
-from .bagel_flow_grpo import *  # noqa: F401, F403
-from .boogu_image_flow_grpo import *  # noqa: F401, F403
-from .ltx2_flow_grpo import *  # noqa: F401, F403
-from .minimax_h3_diffusion_nft import *  # noqa: F401, F403
-from .minimax_h3_flow_grpo import *  # noqa: F401, F403
-from .qwen3_omni import *  # noqa: F401, F403
-from .qwen_image_diffusion_nft import *  # noqa: F401, F403
-from .qwen_image_dpo import *  # noqa: F401, F403
-from .qwen_image_dual_grpo import *  # noqa: F401, F403
-from .qwen_image_edit_flow_grpo import *  # noqa: F401, F403
-from .qwen_image_flow_grpo import *  # noqa: F401, F403
-from .qwen_image_mix_grpo import *  # noqa: F401, F403
-from .sd3_dpo import *  # noqa: F401, F403
-from .sd3_flow_grpo import *  # noqa: F401, F403
-from .wan22_dance_grpo import *  # noqa: F401, F403
+import importlib
+import os
 
-__all__ = list(qwen3_omni.__all__)
-__all__ += list(qwen_image_flow_grpo.__all__)
-__all__ += list(qwen_image_diffusion_nft.__all__)
-__all__ += list(qwen_image_mix_grpo.__all__)
-__all__ += list(bagel_flow_grpo.__all__)
-__all__ += list(ltx2_flow_grpo.__all__)
-__all__ += list(minimax_h3_diffusion_nft.__all__)
-__all__ += list(minimax_h3_flow_grpo.__all__)
-__all__ += list(sd3_dpo.__all__)
-__all__ += list(sd3_flow_grpo.__all__)
-__all__ += list(wan22_dance_grpo.__all__)
-__all__ += list(qwen_image_dpo.__all__)
-__all__ += list(qwen_image_dual_grpo.__all__)
-__all__ += list(qwen_image_edit_flow_grpo.__all__)
-__all__ += list(boogu_image_flow_grpo.__all__)
+PIPELINE_PACKAGES = (
+    "bagel_flow_grpo",
+    "boogu_image_flow_grpo",
+    "ltx2_flow_grpo",
+    "minimax_h3_diffusion_nft",
+    "minimax_h3_flow_grpo",
+    "qwen3_omni",
+    "qwen_image_diffusion_nft",
+    "qwen_image_dpo",
+    "qwen_image_dual_grpo",
+    "qwen_image_edit_flow_grpo",
+    "qwen_image_flow_grpo",
+    "qwen_image_mix_grpo",
+    "sd3_dpo",
+    "sd3_flow_grpo",
+    "wan22_dance_grpo",
+)
+
+pipeline_selection = os.environ.get("VERL_OMNI_AUTO_IMPORT_PIPELINES")
+selected_pipeline_packages = (
+    PIPELINE_PACKAGES if pipeline_selection is None else tuple(name.strip() for name in pipeline_selection.split(","))
+)
+
+__all__ = []
+for package_name in selected_pipeline_packages:
+    package = importlib.import_module(f".{package_name}", __name__)
+    globals()[package_name] = package
+    for exported_name in package.__all__:
+        globals()[exported_name] = getattr(package, exported_name)
+    __all__.extend(package.__all__)
