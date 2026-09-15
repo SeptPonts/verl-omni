@@ -1,6 +1,6 @@
 # MiniMax H3 T2VA, FL2VA, and Ref2VA FlowGRPO
 
-Last updated: 09/02/2026
+Last updated: 09/15/2026
 
 These recipes train `MiniMaxAI/MiniMax-H3` LoRA adapters with FlowGRPO for
 text-to-audio-video (T2VA), first-frame image-to-audio-video (FL2VA), and
@@ -8,8 +8,8 @@ reference-to-audio-video (Ref2VA) generation. The launchers configure a
 Diffusers H3 Actor and vLLM-Omni rollout for joint video and audio generation,
 with CLAP and ImageBind as the default rewards.
 
-T2VA supports NVIDIA GPUs and Ascend NPUs. The FL2VA and full multimodal
-Ref2VA paths target NVIDIA GPUs.
+T2VA supports NVIDIA GPUs, Ascend NPUs, and Cambricon MLUs. The FL2VA and full
+multimodal Ref2VA paths target NVIDIA GPUs.
 
 ## Install
 
@@ -35,11 +35,13 @@ uv pip install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(
 uv pip install -e ".[train,dev]"
 ```
 
-Install the tested Diffusers revision that provides
-`MiniMaxH3Transformer3DModel`:
+The application requires `diffusers>=0.40.0`, which provides
+`MiniMaxH3Transformer3DModel`.
+
+For Cambricon MLU, use the following Diffusers revision:
 
 ```bash
-uv pip install "diffusers @ git+https://github.com/huggingface/diffusers.git@d6726f38a0c5ca6c06a8f227fb7bade3486ed98d"
+uv pip install "diffusers @ git+https://github.com/SeptPonts/diffusers.git@ed4193327490982bf3b111c6279e396e2c329f6f"
 ```
 
 ## Prepare the checkpoint
@@ -171,8 +173,9 @@ export IMAGEBIND_MODEL_PATH=/path/to/imagebind_huge.pth
 ```
 
 By default, CLAP runs on `$REWARD_DEVICE:0` and ImageBind on
-`$REWARD_DEVICE:1`, where `REWARD_DEVICE` is `cuda` for the GPU launcher and
-`npu` for the NPU launcher. Both devices must be visible to the reward worker.
+`$REWARD_DEVICE:1`, where `REWARD_DEVICE` is `cuda` for the GPU launcher,
+`npu` for the NPU launcher, and `mlu` for the MLU launcher. Both devices must
+be visible to the reward worker.
 These rewards validate generated audio/video alignment but do not directly
 measure fidelity to the supplied references.
 
@@ -267,7 +270,19 @@ parameter and optimizer offload. It sources the Ascend toolkit and ATB
 environments from `ASCEND_HOME_PATH`, which defaults to
 `/usr/local/Ascend/ascend-toolkit`.
 
-Both launchers default to online W&B logging. Set `WANDB_MODE=offline` to keep
+### Cambricon MLU
+
+```bash
+MODEL_PATH="$MODEL_ROOT/FL2VA" \
+DATA_DIR="$HOME/data/vid_prompt/verl_omni" \
+IMAGEBIND_MODEL_PATH=/path/to/imagebind_huge.pth \
+bash examples/flowgrpo_trainer/minimax_h3/run_minimax_h3_t2va_lora_mlu.sh
+```
+
+The MLU launcher uses Actor `native`, rollout `TORCH_SDPA`, and FSDP2.
+Actor parameter and optimizer offload are disabled.
+
+All launchers default to online W&B logging. Set `WANDB_MODE=offline` to keep
 metrics local. Checkpoints and logs are written under
 `outputs/<launcher-name>/` unless `OUTPUT_DIR` is set.
 
@@ -275,8 +290,8 @@ metrics local. Checkpoints and logs are written under
 
 | Setting | Default |
 | --- | --- |
-| Devices | 8 GPU / 16 NPU |
-| Rollout DiT TP | 2 GPU / 4 NPU |
+| Devices | 8 GPU / 16 NPU / 8 MLU |
+| Rollout DiT TP | 2 GPU / 4 NPU / 2 MLU |
 | Text-encoder TP | Same as rollout TP |
 | Training batch size | 32 |
 | PPO mini-batch / per-device micro-batch | 16 / 1 |
@@ -322,7 +337,7 @@ Common environment overrides are:
 | `REF_IMAGE_SHORT_EDGE` | Ref2VA training image short edge; defaults to 2048 |
 | `VAL_REF_IMAGE_SHORT_EDGE` | Ref2VA validation image short edge; defaults to the training value |
 | `REWARD_NUM_WORKERS` | Number of reward workers |
-| `REWARD_DEVICE` | Reward device type, such as `cuda` or `npu` |
+| `REWARD_DEVICE` | Reward device type: `cuda`, `npu`, or `mlu` |
 | `CLAP_MODEL_PATH` | CLAP model ID or local path |
 | `IMAGEBIND_MODEL_PATH` | Local ImageBind checkpoint path |
 | `ASPECT_RATIO` | Named H3 canvas ratio |
@@ -334,7 +349,7 @@ Common environment overrides are:
 | `VAL_WIDTH` | Validation output width |
 | `TOTAL_TRAINING_STEPS` | Number of trainer steps |
 
-Extra Hydra overrides may be appended to either launcher command.
+Extra Hydra overrides may be appended to any launcher command.
 
 ## Current limitations
 
