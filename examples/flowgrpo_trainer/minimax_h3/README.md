@@ -313,6 +313,39 @@ bash examples/flowgrpo_trainer/minimax_h3/run_minimax_h3_t2va_lora_mlu.sh
 The MLU launcher uses Actor `native`, rollout `TORCH_SDPA`, and FSDP2.
 Actor parameter and optimizer offload are disabled.
 
+#### Two-node MLU590 baseline
+
+Use `run_minimax_h3_t2va_lora_mlu590.sh` for two nodes with eight MLU590 devices
+each. It reuses the MLU recipe and applies rollout/text TP4 and Actor parameter
+and optimizer offload. Other training settings inherit the MLU launcher.
+FSDP2 spans all 16 devices; rollout has four TP4 replicas, with two
+replicas intended per node. The global batch remains 32 prompts times eight
+samples, rather than scaling with the device count.
+
+Install the same MLU runtime and source revisions on both nodes, and make the
+model, data, reward weights, and output paths available at the same locations.
+Start a Ray head on the first node and join the second node to that cluster
+using their mutually reachable internal addresses. Confirm Ray sees both
+nodes and all 16 devices before launching. The launcher attaches to an existing
+cluster (`RAY_ADDRESS=auto` by default); run it only on the head node.
+
+```bash
+MODEL_PATH="$MODEL_ROOT/FL2VA" \
+DATA_DIR=/path/to/verl_omni_data \
+IMAGEBIND_MODEL_PATH=/path/to/imagebind_huge.pth \
+OUTPUT_DIR=/path/to/persistent/h3-mlu590-baseline \
+bash examples/flowgrpo_trainer/minimax_h3/run_minimax_h3_t2va_lora_mlu590.sh
+```
+
+The launcher uses a separate output directory and W&B experiment name. Like
+the MLU launcher, it defaults to 100 training steps, saves and validates every
+ten steps, retains one checkpoint, and uses `resume_mode=auto`. Per-run choices
+such as a fresh start or a shorter run belong in the launch arguments.
+`NNODES` defaults to 2; `NUM_GPUS` still means devices per node and
+defaults to 8. Other environment overrides and trailing Hydra arguments work
+as in the MLU launcher. This is an initial recipe; two-node MLU590 training,
+TP4 placement, memory headroom, and checkpoint restoration need device validation.
+
 All launchers default to online W&B logging. Set `WANDB_MODE=offline` to keep
 metrics local. Checkpoints and logs are written under
 `outputs/<launcher-name>/` unless `OUTPUT_DIR` is set.
@@ -321,8 +354,8 @@ metrics local. Checkpoints and logs are written under
 
 | Setting | Default |
 | --- | --- |
-| Devices | 8 GPU / 16 NPU / 8 MLU |
-| Rollout DiT TP | 2 GPU / 4 NPU / 2 MLU |
+| Devices | 8 GPU / 16 NPU / 8 MLU / 2x8 MLU590 |
+| Rollout DiT TP | 2 GPU / 4 NPU / 2 MLU / 4 MLU590 |
 | Text-encoder TP | Same as rollout TP with SP disabled |
 | Training batch size | 32 |
 | PPO mini-batch / per-device micro-batch | 16 / 1 |
@@ -378,6 +411,8 @@ Common environment overrides are:
 | `DATA_DIR` | Directory containing `train.parquet` and `test.parquet` |
 | `OUTPUT_DIR` | Checkpoint and log root |
 | `NUM_GPUS` | Devices per node |
+| `NNODES` | Number of nodes for the MLU590 launcher; defaults to 2 |
+| `RAY_ADDRESS` | Existing Ray cluster for the MLU590 launcher; defaults to `auto` |
 | `ROLLOUT_TP` | vLLM-Omni DiT tensor parallel size |
 | `TEXT_ENCODER_TP` | H3 text-encoder tensor parallel size |
 | `MAX_PROMPT_EMBEDS` | Prompt/reference-row padding cap; defaults to 12288 |
