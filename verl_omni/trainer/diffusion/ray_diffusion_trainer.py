@@ -1475,6 +1475,19 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
                             if self.enable_agent_reward_loop:
                                 self.reward_loop_manager.start_profile()
                         gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch_output)
+                        if self.global_steps in (1, 2) and (fc1_directory := os.environ.get("H3_FC1_OBSERVER_DIR")):
+                            ray.get(
+                                [
+                                    server.collective_rpc.remote(
+                                        "record_h3_fc1_warmup",
+                                        kwargs={
+                                            "directory": f"{fc1_directory}/replica_{replica:03d}",
+                                            "rl_step": self.global_steps,
+                                        },
+                                    )
+                                    for replica, server in enumerate(self.llm_server_manager.server_handles)
+                                ]
+                            )
                         if not self.separate:
                             self.checkpoint_manager.sleep_replicas()
                         if curr_step_profile:

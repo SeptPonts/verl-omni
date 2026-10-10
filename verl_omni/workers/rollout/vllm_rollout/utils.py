@@ -86,6 +86,112 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
 
     _pending_lora_peft_config: dict | None = None
 
+    def record_h3_fc1_warmup(self, directory, rl_step):
+        """Record two H3 FC1 caches and active TP slots after warmup generation."""
+        import hashlib
+        import json
+        from pathlib import Path
+
+        if rl_step not in (1, 2):
+            raise ValueError("FC1 observation is restricted to warmup steps 1 and 2")
+        started = time.perf_counter()
+        manager = self.lora_manager
+        adapter_id = manager._active_adapter_id
+        assert adapter_id == VLLM_LORA_INT_ID
+        adapter = manager._registered_adapters[adapter_id]
+        assert adapter.rank == 64
+        request_scale = manager._adapter_scales[adapter_id]
+        assert request_scale == 1.0
+        module_names = (
+            "transformer.blocks.0.mlp.fc1",
+            "transformer.token_refiner.blocks.0.mlp.fc1",
+        )
+        tp_rank = manager._lora_modules[module_names[0]].tp_rank
+        replica = int(os.environ["VERL_REPLICA_RANK"])
+        pid = os.getpid()
+        rows = {}
+        copied_bytes = 0
+
+        def fingerprint(tensor):
+            """Describe a CPU tensor and hash its exact contiguous data bytes."""
+            assert tensor.device.type == "cpu"
+            data = tensor.detach().contiguous().view(torch.uint8).numpy().tobytes()
+            return {"dtype": str(tensor.dtype), "shape": list(tensor.shape), "sha256": hashlib.sha256(data).hexdigest()}
+
+        for name in module_names:
+            layer = manager._lora_modules[name]
+            assert layer.tp_size == 2 and layer.tp_rank == tp_rank
+            for index in range(2):
+                cached = adapter.loras[f"{name}_{index}"]
+                # The real loader has already merged alpha/r=2 into cached B.
+                assert cached.rank == 64 and cached.lora_alpha == 128 and cached.scaling == 1
+                cached_a, cached_b = cached.lora_a, cached.lora_b
+                assert cached_a.device.type == cached_b.device.type == "cpu"
+                local_rows = layer.output_slices[index]
+                shard = layer.output_ids[index]
+                expected_a = cached_a.to(dtype=layer.lora_a_stacked[index].dtype)
+                expected_b = (cached_b[shard * local_rows : (shard + 1) * local_rows] * request_scale).to(
+                    dtype=layer.lora_b_stacked[index].dtype
+                )
+                native_a = layer.lora_a_stacked[index][0, 0, : cached.rank, : cached_a.shape[1]].detach().cpu()
+                native_b = layer.lora_b_stacked[index][0, 0, :local_rows, : cached.rank].detach().cpu()
+                copied_bytes += native_a.numel() * native_a.element_size() + native_b.numel() * native_b.element_size()
+                rows[f"{name}_{index}"] = {
+                    "active": layer._diffusion_lora_active_slices[index],
+                    "cache_scaling_after_optimize": cached.scaling,
+                    "lora_alpha": cached.lora_alpha,
+                    "rank": cached.rank,
+                    "shard_id": shard,
+                    "cache_A": fingerprint(cached_a),
+                    "cache_B": fingerprint(cached_b),
+                    "expected_A": fingerprint(expected_a),
+                    "expected_B": fingerprint(expected_b),
+                    "native_A": fingerprint(native_a),
+                    "native_B": fingerprint(native_b),
+                    "cache_B_nonzero": bool(torch.count_nonzero(cached_b)),
+                    "finite": bool(torch.isfinite(cached_a).all() and torch.isfinite(cached_b).all()),
+                    "A_matches": torch.equal(native_a, expected_a),
+                    "B_matches": torch.equal(native_b, expected_b),
+                }
+
+        passed = all(row["active"] and row["finite"] and row["A_matches"] and row["B_matches"] for row in rows.values())
+        target = Path(directory)
+        target.mkdir(parents=True, exist_ok=True)
+        changed = []
+        if rl_step == 1:
+            passed = passed and not any(row["cache_B_nonzero"] for row in rows.values())
+        else:
+            previous = json.loads((target / f"rl_step_0001_tp_{tp_rank}_pid_{pid}.json").read_text())
+            changed = [key for key, row in rows.items() if row["cache_B"] != previous["slices"][key]["cache_B"]]
+            passed = (
+                passed
+                and previous["check"] == "PASS"
+                and bool(changed)
+                and any(row["cache_B_nonzero"] for row in rows.values())
+            )
+        receipt = {
+            "rl_step": rl_step,
+            "expected_weight_update_step": rl_step - 1,
+            "generation_returned": True,
+            "replica": replica,
+            "tp_rank": tp_rank,
+            "pid": pid,
+            "request_scale": request_scale,
+            "adapter_id": adapter_id,
+            "coverage": list(module_names),
+            "changed_cache_B": changed,
+            "slices": rows,
+            "device_to_cpu_bytes": copied_bytes,
+            "observer_seconds": time.perf_counter() - started,
+            "check": "PASS" if passed else "FAIL",
+        }
+        (target / f"rl_step_{rl_step:04d}_tp_{tp_rank}_pid_{pid}.json").write_text(json.dumps(receipt, indent=2) + "\n")
+        if not passed:
+            raise ValueError(
+                f"FC1 warmup content/activation gate failed: replica={replica} tp={tp_rank} step={rl_step}"
+            )
+
+
     def start_h3_comparison_profile(self, directory, rl_step):
         """Start a TPA generation window on every rank of this diffusion replica."""
         from vllm.distributed.parallel_state import get_tp_group
