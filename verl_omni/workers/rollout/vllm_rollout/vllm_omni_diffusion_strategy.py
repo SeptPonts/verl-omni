@@ -23,6 +23,7 @@ import torchvision.transforms as T
 from verl.utils.import_utils import import_external_libs
 from vllm_omni.inputs.data import OmniDiffusionSamplingParams
 from vllm_omni.lora.request import LoRARequest
+from vllm_omni.platforms import current_omni_platform
 
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
 from verl_omni.pipelines.rollout_media import DiffusionIOSpec
@@ -141,6 +142,10 @@ class DiffusionStrategy(OmniStrategyBase):
     model_config_cls = DiffusionModelConfig
 
     def post_init(self, cuda_visible_devices: str) -> None:
+        """Pass the replica's MLU device list to Omni before it plans stage workers."""
+        if current_omni_platform.device_type == "mlu":
+            # VeRL sets MLU_VISIBLE_DEVICES, while Omni captures CN_VISIBLE_DEVICES.
+            current_omni_platform.set_device_control_env_var(cuda_visible_devices)
         self.server._to_tensor = T.PILToTensor()
 
     def worker_extension_cls(self, device_type: str) -> str:
