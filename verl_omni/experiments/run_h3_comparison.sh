@@ -28,6 +28,7 @@ esac
 
 overrides=(
     trainer.use_v1=false
+    +actor_rollout_ref.rollout.engine_kwargs.vllm_omni.trust_remote_code=true
     trainer.project_name=h3_h20_mlu_comparison
     "trainer.experiment_name=$(basename "$H3_RUN_DIR")"
     "trainer.default_local_dir=$checkpoint_dir"
@@ -51,6 +52,10 @@ overrides=(
     trainer.h3_comparison_lora_snapshot_dir=null
     trainer.max_actor_ckpt_to_keep=1
 )
+if [[ "$platform" == mlu ]]; then
+    # Pinned VeRL requests GPU resources; vendor Ray auto-detects MLU resources.
+    overrides+=(+ray_kwargs.ray_init.num_gpus=8)
+fi
 case "$mode" in
     quality)
         overrides+=(
