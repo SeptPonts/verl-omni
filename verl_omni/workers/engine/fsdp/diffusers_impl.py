@@ -496,6 +496,10 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
         # Apply LoRA adapters if low-rank adaptation is enabled
         if self._is_lora:
             module = self._build_lora_module(module)
+            if self.model_config.h3_comparison_initial_lora_path:
+                from verl_omni.experiments.h3_comparison import load_h3_comparison_lora
+
+                load_h3_comparison_lora(module, self.model_config.h3_comparison_initial_lora_path)
         else:
             # configure trainable parameters for non-lora training
             DiffusionModelBase.get_class(self.model_config).configure_trainable_params(module, self.model_config)

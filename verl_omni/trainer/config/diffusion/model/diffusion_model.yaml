@@ -93,6 +93,9 @@ lora:
 # Path to pre-trained LoRA adapter to load for continued training
 lora_adapter_path: null
 
+# Temporary H20/MLU comparison initialization, after add_adapter and before FSDP.
+h3_comparison_initial_lora_path: null
+
 # Named LoRA policy states required by the algorithm. "reference" disables adapters.
 policy_state_adapters: ["default"]
 

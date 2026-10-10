@@ -112,6 +112,8 @@ class DiffusionModelConfig(BaseConfig):
 
     # path to pre-trained LoRA adapter to load for continued training
     lora_adapter_path: Optional[str] = None
+    # Temporary H20/MLU comparison hook; remove with verl_omni.experiments before delivery.
+    h3_comparison_initial_lora_path: str | None = None
 
     # Named LoRA policy states required by the algorithm. "reference" uses disabled adapters.
     policy_state_adapters: tuple[str, ...] = ("default",)

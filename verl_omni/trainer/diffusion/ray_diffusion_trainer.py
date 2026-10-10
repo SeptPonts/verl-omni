@@ -1129,6 +1129,17 @@ class BaseRayDiffusionTrainer(ABC):
         with open(local_latest_checkpointed_iteration, "w") as f:
             f.write(str(self.global_steps))
 
+        if self.config.trainer.get("h3_comparison_lora_snapshot_dir"):
+            from verl_omni.experiments.h3_comparison import save_h3_comparison_snapshot
+
+            save_h3_comparison_snapshot(self.config, self.global_steps, actor_local_path)
+
+        backup_directory = self.config.trainer.get("h3_comparison_checkpoint_backup_dir")
+        if backup_directory is not None:
+            from verl_omni.experiments.h3_checkpoint_backup import backup_h3_checkpoint
+
+            backup_h3_checkpoint(local_global_step_folder, backup_directory, self.global_steps)
+
     def _load_checkpoint(self):
         if self.config.trainer.resume_mode == "disable":
             return 0
@@ -1337,6 +1348,11 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
         # load checkpoint and update weights before doing anything
         self._load_checkpoint()
         self.checkpoint_manager.update_weights(self.global_steps)
+
+        if self.global_steps == 0 and self.config.trainer.get("h3_comparison_lora_snapshot_dir"):
+            from verl_omni.experiments.h3_comparison import save_h3_comparison_snapshot
+
+            save_h3_comparison_snapshot(self.config, 0)
 
         current_epoch = self.global_steps // len(self.train_dataloader)
 

@@ -398,6 +398,7 @@ actor_rollout_ref:
     lora:
       merge: false
     lora_adapter_path: null
+    h3_comparison_initial_lora_path: null
     policy_state_adapters:
     - default
     lora_dtype: null
@@ -669,6 +670,8 @@ trainer:
   del_local_ckpt_after_load: false
   default_local_dir: checkpoints/${trainer.project_name}/${trainer.experiment_name}
   max_actor_ckpt_to_keep: null
+  h3_comparison_lora_snapshot_dir: null
+  h3_comparison_checkpoint_backup_dir: null
   ray_wait_register_center_timeout: 300
   ray_master_port_range: null
   device: cuda

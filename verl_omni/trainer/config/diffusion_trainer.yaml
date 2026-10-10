@@ -213,6 +213,12 @@ trainer:
   # Maximum number of actor checkpoints to keep
   max_actor_ckpt_to_keep: null
 
+  # Temporary H20/MLU comparison snapshots, outside default_local_dir rotation.
+  h3_comparison_lora_snapshot_dir: null
+
+  # Temporary H3 comparison: synchronous single-generation persistent backup after each full save.
+  h3_comparison_checkpoint_backup_dir: null
+
   # Timeout (in seconds) for Ray worker to wait for registration
   ray_wait_register_center_timeout: 300
 
