@@ -53,6 +53,7 @@ from verl.utils.metric import reduce_metrics
 from verl.utils.py_functional import rename_dict
 from verl.utils.tracking import ValidationGenerationsLogger
 
+from verl_omni.experiments.h3_profiling import h3_generation_profile
 from verl_omni.pipelines.rollout_media import (
     resolve_batch_media_kind,
     resolve_is_video,
@@ -1219,6 +1220,7 @@ class BaseRayDiffusionTrainer(ABC):
             print(f"Warning: No dataloader state found at {dataloader_local_path}, will start from scratch")
 
     def _update_actor(self, batch: DataProto) -> DataProto:
+        """Dispatch all actor mini-updates, carrying the selected comparison RL-step identity."""
         rollout_config = self.config.actor_rollout_ref.rollout
         batch.meta_info["multi_turn"] = rollout_config.multi_turn.enable
         # update actor
@@ -1241,6 +1243,14 @@ class BaseRayDiffusionTrainer(ABC):
             width=self.config.actor_rollout_ref.model.pipeline.width,
             vae_scale_factor=self.config.actor_rollout_ref.model.get("vae_scale_factor", 8),
         )
+
+        profile_directory = self.config.trainer.get("h3_comparison_profile_dir")
+        if profile_directory is not None and self.global_steps == self.config.trainer.h3_comparison_profile_step:
+            tu.assign_non_tensor(
+                batch_td,
+                h3_profile_directory=os.path.join(profile_directory, f"rl_step_{self.global_steps:04d}", "actor_update"),
+                h3_profile_rl_step=self.global_steps,
+            )
 
         actor_output = self.actor_rollout_wg.update_actor(batch_td)
         actor_output = tu.get(actor_output, "metrics")
@@ -1458,7 +1468,7 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
                 is_last_step = self.global_steps >= self.total_training_steps
                 with marked_timer("step", timing_raw):
                     # generate a batch
-                    with marked_timer("gen", timing_raw, color="red"):
+                    with marked_timer("gen", timing_raw, color="red"), h3_generation_profile(self):
                         if curr_step_profile:
                             self.llm_server_manager.start_profile()
                             # streaming reward scores inside the gen window; colocate in the reward phase

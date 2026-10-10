@@ -86,6 +86,23 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
 
     _pending_lora_peft_config: dict | None = None
 
+    def start_h3_comparison_profile(self, directory, rl_step):
+        """Start a TPA generation window on every rank of this diffusion replica."""
+        from vllm.distributed.parallel_state import get_tp_group
+
+        from verl_omni.experiments.h3_profiling import start_h3_profile
+
+        self.h3_comparison_profiler = start_h3_profile(
+            directory, "rollout-generation", rl_step, [(get_tp_group().device_group, "tensor_model_parallel")]
+        )
+
+    def stop_h3_comparison_profile(self, completed=True):
+        """Finish the replica's complete generation window after all requests drain."""
+        from verl_omni.experiments.h3_profiling import stop_h3_profile
+
+        stop_h3_profile(self.h3_comparison_profiler, completed=completed)
+        self.h3_comparison_profiler = None
+
     def __new__(cls, **kwargs):
         set_death_signal()
 

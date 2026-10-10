@@ -224,6 +224,12 @@ trainer:
   # Temporary H3 comparison: synchronous single-generation persistent backup after each full save.
   h3_comparison_checkpoint_backup_dir: null
 
+  # Temporary H3 comparison: opt-in role-local TPA capture, independent of global_profiler.
+  h3_comparison_profile_dir: null
+
+  # One RL training iteration to capture; each role records its own complete phase.
+  h3_comparison_profile_step: 3
+
   # Timeout (in seconds) for Ray worker to wait for registration
   ray_wait_register_center_timeout: 300
 

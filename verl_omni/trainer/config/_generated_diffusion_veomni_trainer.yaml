@@ -675,6 +675,8 @@ trainer:
   h3_comparison_training_manifest_path: null
   h3_comparison_input_records_path: null
   h3_comparison_checkpoint_backup_dir: null
+  h3_comparison_profile_dir: null
+  h3_comparison_profile_step: 3
   ray_wait_register_center_timeout: 300
   ray_master_port_range: null
   device: cuda

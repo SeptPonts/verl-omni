@@ -137,6 +137,10 @@ def run_diffusion(config, task_runner_class=None) -> None:
     """
     OmegaConf.resolve(config)
     _deprecate_v0_trainer(config)
+    if config.trainer.get("h3_comparison_profile_dir"):
+        from verl_omni.experiments.h3_profiling import validate_h3_profiling
+
+        validate_h3_profiling(config)
     if (
         config.actor_rollout_ref.model.get("h3_comparison_initial_lora_path")
         or config.trainer.get("h3_comparison_lora_snapshot_dir")
