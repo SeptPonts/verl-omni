@@ -216,6 +216,11 @@ trainer:
   # Temporary H20/MLU comparison snapshots, outside default_local_dir rotation.
   h3_comparison_lora_snapshot_dir: null
 
+  # Temporary H3 comparison: verify the existing validation rows and persist stable media identities.
+  h3_comparison_evaluation_manifest_path: null
+  h3_comparison_training_manifest_path: null
+  h3_comparison_input_records_path: null
+
   # Temporary H3 comparison: synchronous single-generation persistent backup after each full save.
   h3_comparison_checkpoint_backup_dir: null
 

@@ -494,6 +494,20 @@ class BaseRayDiffusionTrainer(ABC):
             )
         self.train_dataset, self.val_dataset = train_dataset, val_dataset
 
+        self.h3_evaluation_manifest = None
+        manifest_path = self.config.trainer.get("h3_comparison_evaluation_manifest_path")
+        if manifest_path is not None:
+            from verl_omni.experiments.h3_evaluation_manifest import validate_h3_evaluation_dataset
+
+            self.h3_evaluation_manifest = validate_h3_evaluation_dataset(self.config, val_dataset, manifest_path)
+
+        self.h3_training_manifest = None
+        manifest_path = self.config.trainer.get("h3_comparison_training_manifest_path")
+        if manifest_path is not None:
+            from verl_omni.experiments.h3_training_manifest import validate_h3_training_dataset
+
+            self.h3_training_manifest = validate_h3_training_dataset(self.config, train_dataset, manifest_path)
+
         if train_sampler is None:
             train_sampler = create_rl_sampler(self.config.data, self.train_dataset)
         if collate_fn is None:
@@ -714,6 +728,7 @@ class BaseRayDiffusionTrainer(ABC):
         return batch_reward
 
     def _validate(self):
+        """Evaluate the configured dataset and retain optional fixed H3 sample identities in media records."""
         data_source_lst = []
         reward_extra_infos_dict: dict[str, list] = defaultdict(list)
 
@@ -731,7 +746,10 @@ class BaseRayDiffusionTrainer(ABC):
         for test_data in self.val_dataloader:
             test_batch = DataProto.from_single_dict(test_data)
 
-            if "uid" not in test_batch.non_tensor_batch:
+            if self.h3_evaluation_manifest is not None:
+                samples = self.h3_evaluation_manifest["samples"][len(sample_uids) : len(sample_uids) + len(test_batch)]
+                test_batch.non_tensor_batch["uid"] = np.array([sample["sample_id"] for sample in samples], dtype=object)
+            elif "uid" not in test_batch.non_tensor_batch:
                 test_batch.non_tensor_batch["uid"] = np.array(
                     [str(uuid.uuid4()) for _ in range(len(test_batch.batch))], dtype=object
                 )
@@ -829,12 +847,17 @@ class BaseRayDiffusionTrainer(ABC):
         # dump generations
         val_data_dir = self.config.trainer.get("validation_data_dir", None)
         if val_data_dir:
+            media_extra_infos = dict(reward_extra_infos_dict)
+            if self.h3_evaluation_manifest is not None:
+                samples = self.h3_evaluation_manifest["samples"]
+                for field in ("sample_id", "source_row_index", "prompt_sha256", "seed"):
+                    media_extra_infos[f"h3_{field}"] = [sample[field] for sample in samples]
             self._dump_generations(
                 inputs=sample_inputs,
                 outputs=sample_outputs,
                 gts=sample_gts,
                 scores=sample_scores,
-                reward_extra_infos_dict=reward_extra_infos_dict,
+                reward_extra_infos_dict=media_extra_infos,
                 dump_path=val_data_dir,
                 max_samples=self.config.trainer.get("validation_data_max_samples", None),
                 fps=int(self.config.trainer.get("video_fps", 24)),
@@ -1399,6 +1422,16 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
                     )
 
                 batch: DataProto = DataProto.from_single_dict(batch_dict)
+
+                if self.h3_training_manifest is not None:
+                    from verl_omni.experiments.h3_training_manifest import record_h3_training_batch
+
+                    record_h3_training_batch(
+                        self.h3_training_manifest,
+                        batch,
+                        self.global_steps,
+                        self.config.trainer.h3_comparison_input_records_path,
+                    )
 
                 # add uid to batch
                 batch.non_tensor_batch["uid"] = np.array(

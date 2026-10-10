@@ -632,6 +632,9 @@ trainer:
   default_local_dir: checkpoints/${trainer.project_name}/${trainer.experiment_name}
   max_actor_ckpt_to_keep: null
   h3_comparison_lora_snapshot_dir: null
+  h3_comparison_evaluation_manifest_path: null
+  h3_comparison_training_manifest_path: null
+  h3_comparison_input_records_path: null
   h3_comparison_checkpoint_backup_dir: null
   ray_wait_register_center_timeout: 300
   ray_master_port_range: null
