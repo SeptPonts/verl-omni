@@ -55,6 +55,8 @@ overrides=(
 if [[ "$platform" == mlu ]]; then
     # Pinned VeRL requests GPU resources; vendor Ray auto-detects MLU resources.
     overrides+=(+ray_kwargs.ray_init.num_gpus=8)
+    # Full H3 loading on shared storage can exceed Omni's 600-second startup window.
+    overrides+=(+actor_rollout_ref.rollout.engine_kwargs.vllm_omni.init_timeout=1800)
 fi
 case "$mode" in
     quality)
