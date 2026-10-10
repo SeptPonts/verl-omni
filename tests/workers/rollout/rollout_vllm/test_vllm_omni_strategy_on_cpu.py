@@ -981,7 +981,7 @@ def test_drop_defaulted_engine_args_keeps_only_explicit_overrides():
 
     from vllm_omni.engine.arg_utils import OmniEngineArgs
 
-    defaults = asdict(OmniEngineArgs(model=""))
+    defaults = asdict(OmniEngineArgs(model="some-model"))
     engine_args = dict(defaults)
     engine_args["model"] = "some-model"
     engine_args["tensor_parallel_size"] = 2
