@@ -88,9 +88,7 @@ case "$mode" in
         )
         if [[ "$mode" == profile ]]; then
             overrides+=(
-                trainer.test_freq=6
-                "trainer.validation_data_dir=$H3_RUN_DIR/validation_data"
-                trainer.log_val_generations=8
+                trainer.total_training_steps=4
                 "trainer.h3_comparison_profile_dir=$H3_RUN_DIR/profile"
                 trainer.h3_comparison_profile_step=3
             )

@@ -110,7 +110,8 @@ checks constitute full-model or eight-device acceptance.
 
 Quality runs 50 steps with validation at 0/10/20/30/40/50, keep1 full checkpoints
 and six LoRA snapshots. Clean runs six steps without validation/checkpoints/media.
-Profile runs six steps, captures only training step3, then validates once at step6.
+Profile runs four steps, captures only training step3, and checks continued training
+at step4 without validation. Full validation remains in the quality run.
 Use two independent clean runs. Inputs preserve the existing seed42/n8 recipe;
 this integration does not add global seed initialization or full determinism.
 The manifest freezes the actual eight-worker StatefulDataLoader order, including
