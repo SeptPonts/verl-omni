@@ -28,6 +28,9 @@ esac
 
 overrides=(
     trainer.use_v1=false
+    actor_rollout_ref.actor.fsdp_config.param_offload=true
+    actor_rollout_ref.actor.fsdp_config.optimizer_offload=false
+    actor_rollout_ref.actor.fsdp_config.offload_policy=false
     +actor_rollout_ref.rollout.engine_kwargs.vllm_omni.trust_remote_code=true
     trainer.project_name=h3_h20_mlu_comparison
     "trainer.experiment_name=$(basename "$H3_RUN_DIR")"
