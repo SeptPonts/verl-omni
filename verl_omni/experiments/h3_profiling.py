@@ -13,6 +13,7 @@
 # limitations under the License.
 """Temporary H3 role-local TPA windows, with explicit RL-step identity and safe metadata."""
 
+import gc
 import hashlib
 import json
 import os
@@ -42,7 +43,7 @@ def export_h3_profile_metadata(prof):
     prof.has_exported = True
 
 
-def start_h3_profile(directory, role, rl_step, groups=()):
+def start_h3_profile(directory, role, rl_step, groups=(), record_shapes=True):
     """Start one role-local window on every rank, aligned after Kineto starts and before its step."""
     from torch_profiler_analysis import ProfileConfig, initialize_profiler, register_comm_group_type
 
@@ -60,7 +61,7 @@ def start_h3_profile(directory, role, rl_step, groups=()):
         "world_size": dist.get_world_size() if distributed else 1,
         "torch_version": torch.__version__,
         "tpa_version": version("torch-profiler-analysis"),
-        "record_shapes": True,
+        "record_shapes": record_shapes,
         "profile_memory": False,
         "completed": False,
     }
@@ -94,6 +95,9 @@ def start_h3_profile(directory, role, rl_step, groups=()):
             enable_real_comm_time=distributed,
         )
     )
+    # TPA 0.14 hardcodes True in its factory; Torch reads this public attribute in prepare_trace().
+    # Set it before start(), so FSDP swap_tensors can run without profiler shape weakrefs on H20.
+    prof.record_shapes = record_shapes
     # TPA 0.14's default exporter writes all os.environ and sys.argv, including possible credentials.
     # Bind only this capture instance; do not patch the installed package or unrelated profilers.
     prof._export_extra_info = MethodType(export_h3_profile_metadata, prof)
@@ -144,7 +148,13 @@ def h3_actor_profile(data, engine):
         return
     groups = [(engine.get_data_parallel_group(), "data_parallel")]
     groups.extend((group, "fsdp") for group in engine.device_mesh.get_all_groups())
-    prof = start_h3_profile(directory, "actor-update", tu.get(data, "h3_profile_rl_step"), groups)
+    prof = start_h3_profile(
+        directory,
+        "actor-update",
+        tu.get(data, "h3_profile_rl_step"),
+        groups,
+        record_shapes=tu.get(data, "h3_profile_record_shapes"),
+    )
     completed = False
     try:
         with torch.profiler.record_function("h3/actor_update"):
@@ -152,29 +162,46 @@ def h3_actor_profile(data, engine):
         completed = True
     finally:
         stop_h3_profile(prof, completed=completed)
+        # Profiler callbacks retain their owner cyclically; release its trace before the next RL step.
+        del prof
+        gc.collect()
 
 
 @contextmanager
 def h3_generation_profile(trainer):
-    """Fan out one generation window to each independent TP replica and custom reward worker."""
+    """Capture complete TP replicas and reward workers only on their selected RL steps."""
     import ray
 
     directory = trainer.config.trainer.get("h3_comparison_profile_dir")
-    if directory is None or trainer.global_steps != trainer.config.trainer.h3_comparison_profile_step:
+    if directory is None:
+        yield
+        return
+    windows = {
+        window.role: window
+        for window in trainer.config.trainer.h3_comparison_profile_windows
+        if window.step == trainer.global_steps and window.role in ("rollout", "reward")
+    }
+    if not windows:
         yield
         return
     root = Path(directory) / f"rl_step_{trainer.global_steps:04d}"
-    servers = trainer.llm_server_manager.server_handles
-    rewards = trainer.reward_loop_manager.reward_loop_workers
+    servers = trainer.llm_server_manager.server_handles if "rollout" in windows else []
+    rewards = trainer.reward_loop_manager.reward_loop_workers if "reward" in windows else []
     starts = [
         server.collective_rpc.remote(
             "start_h3_comparison_profile",
-            kwargs={"directory": str(root / f"rollout_replica_{replica:03d}"), "rl_step": trainer.global_steps},
+            kwargs={
+                "directory": str(root / f"rollout_replica_{replica:03d}"),
+                "rl_step": trainer.global_steps,
+                "record_shapes": windows["rollout"].record_shapes,
+            },
         )
         for replica, server in enumerate(servers)
     ]
     starts.extend(
-        worker.start_h3_comparison_profile.remote(str(root / f"reward_worker_{index:03d}"), trainer.global_steps)
+        worker.start_h3_comparison_profile.remote(
+            str(root / f"reward_worker_{index:03d}"), trainer.global_steps, windows["reward"].record_shapes
+        )
         for index, worker in enumerate(rewards)
     )
     ray.get(starts)
@@ -199,8 +226,16 @@ def validate_h3_profiling(config):
         raise ValueError("H3 TPA capture requires the V0 trainer and FSDP2")
     if config.global_profiler.tool is not None or config.global_profiler.steps is not None:
         raise ValueError("H3 TPA capture owns the collectors; disable global_profiler tool and steps")
-    if not 0 < config.trainer.h3_comparison_profile_step <= config.trainer.total_training_steps:
-        raise ValueError("H3 TPA target must be a training RL step in this run")
+    seen = set()
+    for window in config.trainer.h3_comparison_profile_windows:
+        if window.role not in ("actor", "rollout", "reward"):
+            raise ValueError(f"Unsupported H3 TPA role: {window.role}")
+        if not 0 < window.step <= config.trainer.total_training_steps:
+            raise ValueError(f"H3 TPA {window.role} target must be a training RL step in this run")
+        identity = (window.role, window.step)
+        if identity in seen:
+            raise ValueError(f"Duplicate H3 TPA window: {identity}")
+        seen.add(identity)
     if not config.reward.custom_reward_function.path or config.reward.reward_model.enable:
         raise ValueError("H3 TPA capture expects the existing custom CLAP/ImageBind reward workers")
     if config.algorithm.adv_estimator != "flow_grpo" or config.algorithm.sample_source != "online":

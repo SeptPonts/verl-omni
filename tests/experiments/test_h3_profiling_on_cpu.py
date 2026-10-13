@@ -15,10 +15,13 @@
 
 import ast
 import builtins
+import gc
 import hashlib
 import importlib.util
 import json
+import os
 import sys
+import weakref
 from contextlib import contextmanager
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -73,6 +76,7 @@ class FakeProfiler:
     def start(self):
         """Exercise the actual instance-bound start_trace override."""
         self.state.events.append("profiler-start")
+        self.record_shapes_at_start = self.record_shapes
         self.start_trace()
 
     def step(self):
@@ -198,6 +202,9 @@ def profiling_config(directory):
         trainer=Config(
             h3_comparison_profile_dir=directory,
             h3_comparison_profile_step=3,
+            h3_comparison_profile_windows=[
+                Config(role=role, step=3, record_shapes=True) for role in ("actor", "rollout", "reward")
+            ],
             total_training_steps=6,
             use_v1=False,
         ),
@@ -249,7 +256,7 @@ def test_actor_two_mini_updates_share_actual_worker_window(api, capture, tmp_pat
     )
     actor = SimpleNamespace(engine=engine, train_mini_batch=train_mini_batch)
     worker = SimpleNamespace(config=Config(actor=Config()), actor=actor)
-    batch = {"h3_profile_directory": str(tmp_path / "actor"), "h3_profile_rl_step": 3}
+    batch = {"h3_profile_directory": str(tmp_path / "actor"), "h3_profile_rl_step": 3, "h3_profile_record_shapes": True}
     assert namespace["update_actor"](worker, batch) == "cpu-result"
     assert len(capture.profiles) == 1
     assert capture.events == [
@@ -328,7 +335,7 @@ def test_actor_phase_failure_marks_receipt(api, capture, tmp_path, failed):
     engine = SimpleNamespace(
         get_data_parallel_group=Mock(), device_mesh=SimpleNamespace(get_all_groups=Mock(return_value=[]))
     )
-    batch = {"h3_profile_directory": str(tmp_path / "actor"), "h3_profile_rl_step": 3}
+    batch = {"h3_profile_directory": str(tmp_path / "actor"), "h3_profile_rl_step": 3, "h3_profile_record_shapes": True}
     if failed:
         with pytest.raises(RuntimeError, match="mini-update failed"), api.h3_actor_profile(batch, engine):
             raise RuntimeError("mini-update failed")
@@ -379,12 +386,14 @@ def test_generation_fanout_covers_all_servers_rewards_and_failure(api, tmp_path,
     for index, server in enumerate(servers):
         assert server.collective_rpc.remote.call_args_list[0].args == ("start_h3_comparison_profile",)
         assert server.collective_rpc.remote.call_args_list[0].kwargs == {
-            "kwargs": {"directory": str(root / f"rollout_replica_{index:03d}"), "rl_step": 3}
+            "kwargs": {"directory": str(root / f"rollout_replica_{index:03d}"), "rl_step": 3, "record_shapes": True}
         }
         assert server.collective_rpc.remote.call_args_list[1].kwargs == {"kwargs": {"completed": not failed}}
         assert server.collective_rpc.remote.call_args_list[1].args == ("stop_h3_comparison_profile",)
     for index, worker in enumerate(rewards):
-        worker.start_h3_comparison_profile.remote.assert_called_once_with(str(root / f"reward_worker_{index:03d}"), 3)
+        worker.start_h3_comparison_profile.remote.assert_called_once_with(
+            str(root / f"reward_worker_{index:03d}"), 3, True
+        )
         worker.stop_h3_comparison_profile.remote.assert_called_once_with(not failed)
     assert sys.modules["ray"].get.call_count == 2
     assert len(sys.modules["ray"].get.call_args.args[0]) == 6
@@ -399,7 +408,91 @@ def test_non_target_generation_step_does_not_contact_workers(api, tmp_path):
     assert list(tmp_path.iterdir()) == []
 
 
-@pytest.mark.parametrize("invalid", ["v1", "strategy", "collector", "step", "reward", "offline"])
+@pytest.mark.parametrize("platform", ["mlu", "cuda"])
+@pytest.mark.parametrize("step", [1, 2, 3])
+def test_actor_only_schedule_uses_actual_dispatch(api, tmp_path, platform, step):
+    """Select two Actor windows with per-step shapes and never access generation profiler workers."""
+    config = profiling_config(str(tmp_path / "profiles"))
+    config.trainer.total_training_steps = 3
+    config.trainer.h3_comparison_profile_windows = [
+        Config(role="actor", step=2, record_shapes=False),
+        Config(role="actor", step=3, record_shapes=False),
+    ]
+    config.actor_rollout_ref.rollout = Config(multi_turn=Config(enable=False), n=8)
+    config.actor_rollout_ref.actor = Config(
+        strategy="fsdp2", ppo_mini_batch_size=16, ppo_epochs=1, data_loader_seed=42, shuffle=False
+    )
+    config.actor_rollout_ref.model = Config(pipeline=Config(height=256, width=384), vae_scale_factor=8)
+    api.validate_h3_profiling(config)
+    trainer = SimpleNamespace(
+        config=config,
+        global_steps=step,
+        actor_rollout_wg=SimpleNamespace(update_actor=Mock(return_value={"metrics": {}})),
+    )
+    # Neither generation manager is exposed: Actor-only windows cannot contact their profiler RPCs.
+    with api.h3_generation_profile(trainer):
+        pass
+    sys.modules["ray"].get.assert_not_called()
+
+    source = ROOT / "verl_omni/trainer/diffusion/ray_diffusion_trainer.py"
+    method = next(
+        node
+        for node in ast.walk(ast.parse(source.read_text()))
+        if isinstance(node, ast.FunctionDef) and node.name == "_update_actor"
+    )
+    batch_td = {}
+    namespace = {
+        "DataProto": SimpleNamespace(from_single_dict=Mock(return_value="actor-result")),
+        "_to_diffusion_worker_tensordict": Mock(return_value=batch_td),
+        "embeds_padding_2_no_padding": Mock(return_value=batch_td),
+        "tu": sys.modules["verl.utils.tensordict_utils"],
+        "rename_dict": Mock(return_value={}),
+        "os": os,
+    }
+    exec(compile(ast.Module(body=[method], type_ignores=[]), str(source), "exec"), namespace)
+    assert namespace["_update_actor"](trainer, SimpleNamespace(meta_info={})) == "actor-result"
+    trainer.actor_rollout_wg.update_actor.assert_called_once_with(batch_td)
+    if step in (2, 3):
+        assert batch_td["h3_profile_directory"] == str(tmp_path / f"profiles/rl_step_{step:04d}/actor_update")
+        assert batch_td["h3_profile_rl_step"] == step
+        assert batch_td["h3_profile_record_shapes"] is False
+    else:
+        assert "h3_profile_directory" not in batch_td
+        assert "h3_profile_rl_step" not in batch_td
+        assert "h3_profile_record_shapes" not in batch_td
+
+
+@pytest.mark.parametrize("shape_flags", [(False, False)])
+def test_actor_shapes_and_release_across_successive_windows(api, capture, tmp_path, shape_flags):
+    """Apply shapes before native startup and release each exported trace before the next RL step."""
+    engine = SimpleNamespace(
+        get_data_parallel_group=Mock(), device_mesh=SimpleNamespace(get_all_groups=Mock(return_value=[]))
+    )
+    gc_was_enabled = gc.isenabled()
+    gc.disable()
+    try:
+        for step, record_shapes in enumerate(shape_flags, start=2):
+            directory = tmp_path / f"rl_step_{step:04d}" / "actor_update"
+            batch = {
+                "h3_profile_directory": str(directory),
+                "h3_profile_rl_step": step,
+                "h3_profile_record_shapes": record_shapes,
+            }
+            with api.h3_actor_profile(batch, engine):
+                reference = weakref.ref(capture.profiles.pop())
+                assert reference().record_shapes_at_start is record_shapes
+            assert reference() is None
+            receipt = json.loads((directory / "h3_metadata/h3_profile_rank0.json").read_text())
+            assert receipt["completed"] is True
+            assert receipt["record_shapes"] is record_shapes
+            assert receipt["rl_step"] == step
+    finally:
+        gc.collect()
+        if gc_was_enabled:
+            gc.enable()
+
+
+@pytest.mark.parametrize("invalid", ["v1", "strategy", "collector", "step", "reward", "offline", "duplicate", "role"])
 def test_enabled_profile_rejects_incompatible_contract(api, tmp_path, invalid):
     """Reject competing collectors and unsupported trainer/reward/workload configurations before workers start."""
     config = profiling_config(str(tmp_path / "profiles"))
@@ -411,9 +504,13 @@ def test_enabled_profile_rejects_incompatible_contract(api, tmp_path, invalid):
     elif invalid == "collector":
         config.global_profiler.steps = [3]
     elif invalid == "step":
-        config.trainer.h3_comparison_profile_step = 7
+        config.trainer.h3_comparison_profile_windows[0].step = 7
     elif invalid == "reward":
         config.reward.reward_model.enable = True
+    elif invalid == "duplicate":
+        config.trainer.h3_comparison_profile_windows.append(config.trainer.h3_comparison_profile_windows[0])
+    elif invalid == "role":
+        config.trainer.h3_comparison_profile_windows[0].role = "acotr"
     else:
         config.algorithm.sample_source = "offline"
     with pytest.raises(ValueError):

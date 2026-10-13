@@ -81,11 +81,13 @@ class OmniRewardLoopWorker(RewardLoopWorker):
                 self.native_reward_executors,
             )
 
-    def start_h3_comparison_profile(self, directory, rl_step):
+    def start_h3_comparison_profile(self, directory, rl_step, record_shapes=True):
         """Capture custom CLAP/ImageBind device work during the matching generation window."""
         from verl_omni.experiments.h3_profiling import start_h3_profile
 
-        self.h3_comparison_profiler = start_h3_profile(directory, "custom-reward-generation", rl_step)
+        self.h3_comparison_profiler = start_h3_profile(
+            directory, "custom-reward-generation", rl_step, record_shapes=record_shapes
+        )
 
     def stop_h3_comparison_profile(self, completed=True):
         """Export custom reward work after generation has awaited its reward futures."""

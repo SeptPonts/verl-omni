@@ -192,14 +192,18 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
             )
 
 
-    def start_h3_comparison_profile(self, directory, rl_step):
+    def start_h3_comparison_profile(self, directory, rl_step, record_shapes=True):
         """Start a TPA generation window on every rank of this diffusion replica."""
         from vllm.distributed.parallel_state import get_tp_group
 
         from verl_omni.experiments.h3_profiling import start_h3_profile
 
         self.h3_comparison_profiler = start_h3_profile(
-            directory, "rollout-generation", rl_step, [(get_tp_group().device_group, "tensor_model_parallel")]
+            directory,
+            "rollout-generation",
+            rl_step,
+            [(get_tp_group().device_group, "tensor_model_parallel")],
+            record_shapes=record_shapes,
         )
 
     def stop_h3_comparison_profile(self, completed=True):

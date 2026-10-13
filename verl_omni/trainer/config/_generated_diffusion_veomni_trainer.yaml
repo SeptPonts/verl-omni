@@ -677,6 +677,10 @@ trainer:
   h3_comparison_checkpoint_backup_dir: null
   h3_comparison_profile_dir: null
   h3_comparison_profile_step: 3
+  h3_comparison_profile_windows:
+    - {role: actor, step: "${trainer.h3_comparison_profile_step}", record_shapes: true}
+    - {role: rollout, step: "${trainer.h3_comparison_profile_step}", record_shapes: true}
+    - {role: reward, step: "${trainer.h3_comparison_profile_step}", record_shapes: true}
   ray_wait_register_center_timeout: 300
   ray_master_port_range: null
   device: cuda

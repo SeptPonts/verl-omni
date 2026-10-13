@@ -1245,12 +1245,17 @@ class BaseRayDiffusionTrainer(ABC):
         )
 
         profile_directory = self.config.trainer.get("h3_comparison_profile_dir")
-        if profile_directory is not None and self.global_steps == self.config.trainer.h3_comparison_profile_step:
-            tu.assign_non_tensor(
-                batch_td,
-                h3_profile_directory=os.path.join(profile_directory, f"rl_step_{self.global_steps:04d}", "actor_update"),
-                h3_profile_rl_step=self.global_steps,
-            )
+        if profile_directory is not None:
+            for window in self.config.trainer.h3_comparison_profile_windows:
+                if window.role == "actor" and window.step == self.global_steps:
+                    tu.assign_non_tensor(
+                        batch_td,
+                        h3_profile_directory=os.path.join(
+                            profile_directory, f"rl_step_{self.global_steps:04d}", "actor_update"
+                        ),
+                        h3_profile_rl_step=self.global_steps,
+                        h3_profile_record_shapes=window.record_shapes,
+                    )
 
         actor_output = self.actor_rollout_wg.update_actor(batch_td)
         actor_output = tu.get(actor_output, "metrics")

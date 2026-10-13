@@ -227,8 +227,12 @@ trainer:
   # Temporary H3 comparison: opt-in role-local TPA capture, independent of global_profiler.
   h3_comparison_profile_dir: null
 
-  # One RL training iteration to capture; each role records its own complete phase.
+  # Keep existing single-step launchers valid; the window list can select multiple steps per role.
   h3_comparison_profile_step: 3
+  h3_comparison_profile_windows:
+    - {role: actor, step: "${trainer.h3_comparison_profile_step}", record_shapes: true}
+    - {role: rollout, step: "${trainer.h3_comparison_profile_step}", record_shapes: true}
+    - {role: reward, step: "${trainer.h3_comparison_profile_step}", record_shapes: true}
 
   # Timeout (in seconds) for Ray worker to wait for registration
   ray_wait_register_center_timeout: 300
