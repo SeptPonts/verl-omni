@@ -51,14 +51,16 @@ def h3_training_schedule(config, train_dataset, source_indices=None):
     if dataset_config and dataset_config.get("path") is not None:
         raise ValueError("H3 training manifest requires the default RLHFDataset")
     if (
-        data.seed != 42
+        data.seed is None
         or not data.shuffle
         or data.train_batch_size != PROMPTS_PER_STEP
         or data.get("gen_batch_size", data.train_batch_size) != PROMPTS_PER_STEP
         or rollout.seed != 42
         or rollout.n != ROLLOUT_N
     ):
-        raise ValueError("H3 training manifest requires data/rollout seed42, shuffle=true, and 32 prompts x n8")
+        raise ValueError(
+            "H3 training manifest requires an explicit data seed, rollout seed42, shuffle=true, and 32 prompts x n8"
+        )
     if len(train_dataset) < TRAINING_STEPS * PROMPTS_PER_STEP:
         raise ValueError("H3 training manifest requires all 50 batches to fit in the first epoch")
     rows = [train_dataset.dataframe[index] for index in range(len(train_dataset))]
@@ -98,7 +100,7 @@ def h3_training_schedule(config, train_dataset, source_indices=None):
         "dataset_row_count": len(rows),
         "all_row_fields_sha256": json_sha256(rows),
         "sampling": {
-            "data_seed": 42,
+            "data_seed": data.seed,
             "shuffle": True,
             "prompts_per_step": 32,
             "rollout_n": 8,

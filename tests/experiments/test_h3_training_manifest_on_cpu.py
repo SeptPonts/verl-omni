@@ -85,9 +85,11 @@ def case(api, tmp_path):
 
 
 @pytest.mark.parametrize("workers", [0, 8])
-def test_real_fifty_batches_match_and_validator_preserves_rng(api, case, tmp_path, workers):
+@pytest.mark.parametrize("data_seed", [42, 43, 44])
+def test_real_fifty_batches_match_and_validator_preserves_rng(api, case, tmp_path, workers, data_seed):
     """Check all 50 actual pre-repeat batches without advancing the live sampler or default RNG."""
     case.config.data.dataloader_num_workers = workers
+    case.config.data.seed = data_seed
     global_state = torch.random.get_rng_state().clone()
     case.manifest = api.manifest.create_h3_training_manifest(case.config, case.dataset, case.path)
     assert torch.equal(torch.random.get_rng_state(), global_state)
@@ -191,7 +193,7 @@ def test_changed_actual_batch_fails_before_writing(api, case, tmp_path, change):
 @pytest.mark.parametrize(
     "key,value",
     [
-        ("data.seed", 43),
+        ("data.seed", None),
         ("data.shuffle", False),
         ("data.train_batch_size", 16),
         ("data.gen_batch_size", 64),
@@ -202,8 +204,21 @@ def test_changed_actual_batch_fails_before_writing(api, case, tmp_path, change):
 def test_reject_changed_sampling_contract(api, case, key, value):
     """Fail explicitly if a run changes the frozen data ordering or prompt expansion contract."""
     OmegaConf.update(case.config, key, value)
-    with pytest.raises(ValueError, match="data/rollout seed42"):
+    with pytest.raises(ValueError, match="explicit data seed, rollout seed42"):
         api.manifest.validate_h3_training_dataset(case.config, case.dataset, case.manifest_path)
+
+
+def test_data_seed_changes_prompts_but_not_request_seeds(api, case):
+    """Reject another seed's manifest and freeze distinct prompts with unchanged generation seeds."""
+    case.config.data.seed = 43
+    with pytest.raises(ValueError, match="dataset or first-50-step"):
+        api.manifest.validate_h3_training_dataset(case.config, case.dataset, case.manifest_path)
+    candidate = api.manifest.create_h3_training_manifest(case.config, case.dataset, case.path)
+    assert candidate["sampling"]["data_seed"] == 43
+    assert candidate["steps"][0]["prompts"] != case.manifest["steps"][0]["prompts"]
+    assert [step["request_seeds"] for step in candidate["steps"]] == [
+        step["request_seeds"] for step in case.manifest["steps"]
+    ]
 
 
 def test_reject_edited_request_seed_manifest(api, case):
