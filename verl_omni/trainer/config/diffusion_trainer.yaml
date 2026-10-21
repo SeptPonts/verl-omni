@@ -231,8 +231,8 @@ trainer:
   h3_comparison_profile_step: 3
   h3_comparison_profile_windows:
     - {role: actor, step: "${trainer.h3_comparison_profile_step}", record_shapes: true}
-    - {role: rollout, step: "${trainer.h3_comparison_profile_step}", record_shapes: true}
-    - {role: reward, step: "${trainer.h3_comparison_profile_step}", record_shapes: true}
+    # Replica selects a complete TP group; request bounds are inclusive and restart at each RL step.
+    - {role: rollout, step: "${trainer.h3_comparison_profile_step}", record_shapes: true, replica: 0, request_start: 3, request_end: 4}
 
   # Timeout (in seconds) for Ray worker to wait for registration
   ray_wait_register_center_timeout: 300

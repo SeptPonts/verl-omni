@@ -323,6 +323,8 @@ class TrainingWorker(Worker, DistProfilerExtension):
         Returns:
 
         """
+        from verl_omni.experiments.h3_profiling import h3_actor_profile
+
         maybe_fix_3d_position_ids(data)
         batch_size_per_dp = data.shape[0]
         disable_auto_offload = tu.pop(data, key="disable_auto_offload", default=False)
@@ -354,6 +356,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
 
         with (
             self.engine.train_mode(disable_auto_offload=disable_auto_offload),
+            h3_actor_profile(data, self.engine),
             Timer(name="train_batch", logger=None),
         ):
             # update
@@ -915,16 +918,13 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     @DistProfiler.annotate(color="red", role="actor_update")
     @_with_routing_replay_flag(enabled=True)
     def update_actor(self, data: TensorDict) -> TensorDict:
-        """Run the actor update, optionally collecting one complete H3 comparison phase."""
-        from verl_omni.experiments.h3_profiling import h3_actor_profile
-
+        """Run the actor update; train_mini_batch owns profiling between parameter transfers."""
         tu.assign_non_tensor(data, enable_timestep_staging=self.config.actor.get("enable_timestep_staging", False))
         tu.assign_non_tensor(
             data,
             use_no_sync_for_gradient_accumulation=self.config.actor.get("use_no_sync_for_gradient_accumulation", False),
         )
-        with h3_actor_profile(data, self.actor.engine):
-            output = self.actor.train_mini_batch(data=data)
+        output = self.actor.train_mini_batch(data=data)
         return output.cpu() if output is not None else None
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)

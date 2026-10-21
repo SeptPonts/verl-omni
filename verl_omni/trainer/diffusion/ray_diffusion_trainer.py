@@ -1251,7 +1251,7 @@ class BaseRayDiffusionTrainer(ABC):
                     tu.assign_non_tensor(
                         batch_td,
                         h3_profile_directory=os.path.join(
-                            profile_directory, f"rl_step_{self.global_steps:04d}", "actor_update"
+                            profile_directory, f"rl_step_{self.global_steps:04d}", "actor_update_compute"
                         ),
                         h3_profile_rl_step=self.global_steps,
                         h3_profile_record_shapes=window.record_shapes,

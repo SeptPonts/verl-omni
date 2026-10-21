@@ -192,26 +192,30 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
             )
 
 
-    def start_h3_comparison_profile(self, directory, rl_step, record_shapes=True):
-        """Start a TPA generation window on every rank of this diffusion replica."""
+    def start_h3_comparison_profile(self, directory, rl_step, record_shapes, request_start, request_end):
+        """Arm the same full-request window on every TP rank of this diffusion replica."""
         from vllm.distributed.parallel_state import get_tp_group
 
-        from verl_omni.experiments.h3_profiling import start_h3_profile
+        from verl_omni.experiments.h3_profiling import H3RolloutProfile
 
-        self.h3_comparison_profiler = start_h3_profile(
+        self.h3_comparison_profile = H3RolloutProfile(
+            self.execute_model,
             directory,
-            "rollout-generation",
             rl_step,
-            [(get_tp_group().device_group, "tensor_model_parallel")],
-            record_shapes=record_shapes,
+            get_tp_group().device_group,
+            record_shapes,
+            request_start,
+            request_end,
         )
+        # Instance-local interception preserves the installed backend and all unselected replicas.
+        self.execute_model = self.h3_comparison_profile.execute_request
 
     def stop_h3_comparison_profile(self, completed=True):
-        """Finish the replica's complete generation window after all requests drain."""
-        from verl_omni.experiments.h3_profiling import stop_h3_profile
-
-        stop_h3_profile(self.h3_comparison_profiler, completed=completed)
-        self.h3_comparison_profiler = None
+        """Restore normal request dispatch and check the bounded capture after generation drains."""
+        profile = self.h3_comparison_profile
+        self.execute_model = profile.execute_model
+        self.h3_comparison_profile = None
+        profile.finish_generation(completed)
 
     def __new__(cls, **kwargs):
         set_death_signal()

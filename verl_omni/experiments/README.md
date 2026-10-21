@@ -110,8 +110,9 @@ checks constitute full-model or eight-device acceptance.
 
 Quality runs 50 steps with validation at 0/10/20/30/40/50, keep1 full checkpoints
 and six LoRA snapshots. Clean runs six steps without validation/checkpoints/media.
-Profile runs four steps, captures only training step3, and checks continued training
-at step4 without validation. Full validation remains in the quality run.
+Profile runs four steps in one continuous training job: step1 warms up, steps2/3
+capture both Actor and Rollout, and step4 checks unprofiled continuation. It does
+not capture Reward or run validation. Full validation remains in the quality run.
 Use two independent clean runs. Inputs preserve the existing seed42/n8 recipe;
 this integration does not add global seed initialization or full determinism.
 The manifest freezes the actual eight-worker StatefulDataLoader order, including
@@ -146,16 +147,59 @@ save, transfer and verification before the allocation ends.
 ## TPA boundary
 
 TPA is imported lazily only by an enabled role-local capture. The old
-`global_profiler` collector must remain disabled. Each process records local
-`ProfilerStep#0` with an explicit RL step3 identity: eight actor-update traces,
-four independent TP2 rollout pairs, and one custom reward process trace. The
-actor window includes both optimizer mini-updates. Old-logprob and weight sync
-currently retain trainer timers but do not get separate device traces.
+`global_profiler` collector must remain disabled. Both backends use shapes, with
+memory and stack collection disabled and online analysis skipped. Each selected
+RL step produces eight `actor_update_compute/` traces and one complete TP2 pair
+under `rollout_replica_000/`: 20 traces over steps2/3. Each trace has its own local
+`ProfilerStep#0`; `h3_metadata/` records the actual RL step and capture scope.
 
-Analyse the actor and each replica separately. Reward may execute on two devices
-inside one process: inspect its device identities before interpreting a merged
-summary. TPA Device-Duration/Device-Gap are local profile-on metrics, not clean RL
+The Actor window starts inside `engine.train_mode`, after parameter onload. It
+includes both optimizer mini-updates and ends with stop/export plus profiler
+object collection before train-mode offload. Its role/annotation is
+`actor-update-compute` / `h3/actor_update_compute`, deliberately distinct from
+historical full `actor_update/` traces that included parameter transfers.
+
+Rollout selects one **replica**, never an incomplete subset of its TP ranks.
+Its window configuration requires `replica`, `request_start`, and `request_end`;
+the supplied recipe sets inclusive 1-based bounds to 3..4. Older custom Rollout
+window lists must add these fields; there is no full-generation fallback.
+The selected worker's existing
+`execute_model` is intercepted only for that generation phase. It skips the
+first two full requests, captures requests3/4 including all denoise iterations,
+then exports and releases the profiler before request5 or replica sleep. Both
+TP ranks retain request ordinals and backend request IDs in their receipts.
+The generation-end RPC restores normal dispatch and rejects a successful phase
+that never completed the requested window. Counters restart on the next selected
+RL step. This route assumes H3 full-request execution with request batching and
+stepwise execution disabled; it does not change sampling or reduce the training
+batch. Check request identities against `input_batches.jsonl` and backend request
+mapping before claiming paired inputs across platforms.
+
+Generation completes before Actor update within the same RL step. The two role
+collectors need not overlap; no second training launch is required. Old-logprob
+and weight sync retain trainer timers without separate device traces. Profile-on
+stage times include observer/export overhead and cannot replace clean timing.
+
+Analyse each step's Actor group and TP2 group separately, outside training. The
+optional `reward` window remains supported when explicitly selected; a reward
+process may use two devices, requiring separate device-identity inspection.
+TPA Device-Duration/Device-Gap are local profile-on metrics, not clean RL
 E2E or proof of physical-device idleness. The exporter excludes unrestricted
 environment/argv dumps; identity JSON lives in `h3_metadata/` because TPA scans
 all top-level JSON as raw traces. Check every expected rank, completed flag,
 trace SHA, actual device events, and absolute/percent summary consistency.
+
+CPU contract tests cover dispatch, boundaries, counter reset, failure receipts,
+and Python profiler ownership. They do not certify native weakref release,
+distributed progress, export memory, full TPA FLOPs/communication coverage, or
+MLU clock alignment. Before accepting the new recipe on the dedicated 692,
+require all four training steps to complete, 20 complete/hash-verified traces
+with shapes, matching TP request lists, and native offline summary inspection.
+H20 needs its own hardware acceptance with the same scope.
+
+Run the local contract and real-launcher configuration checks without loading
+models or starting Ray (requires pytest, hydra-core, and omegaconf):
+
+```bash
+python -m pytest -q tests/experiments/test_h3_profiling_on_cpu.py tests/experiments/test_h3_profile_config_on_cpu.py --confcutdir=tests/experiments
+```

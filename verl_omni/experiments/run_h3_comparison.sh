@@ -88,12 +88,12 @@ case "$mode" in
         )
         if [[ "$mode" == profile ]]; then
             overrides+=(
-                trainer.total_training_steps=3
+                trainer.total_training_steps=4
                 "trainer.h3_comparison_profile_dir=$H3_RUN_DIR/profile"
             )
-            # Keep shapes off in both Actor windows on both backends.
+            # One warmup step, paired Actor/Rollout windows at steps 2/3, then unprofiled continuation.
             overrides+=(
-                'trainer.h3_comparison_profile_windows=[{role:actor,step:2,record_shapes:false},{role:actor,step:3,record_shapes:false}]'
+                'trainer.h3_comparison_profile_windows=[{role:actor,step:2,record_shapes:true},{role:rollout,step:2,record_shapes:true,replica:0,request_start:3,request_end:4},{role:actor,step:3,record_shapes:true},{role:rollout,step:3,record_shapes:true,replica:0,request_start:3,request_end:4}]'
             )
             if [[ "$action" == run ]]; then
                 python3 -c 'from torch_profiler_analysis import ProfileConfig, initialize_profiler, profile_analyse_offline'

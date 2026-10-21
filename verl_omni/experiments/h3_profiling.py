@@ -139,7 +139,7 @@ def stop_h3_profile(prof, completed=True):
 
 @contextmanager
 def h3_actor_profile(data, engine):
-    """Capture both optimizer mini-updates as one actor-update, only for a marked comparison batch."""
+    """Capture both mini-updates after train-mode onload, releasing the trace before offload."""
     import verl.utils.tensordict_utils as tu
 
     directory = tu.get(data, "h3_profile_directory", default=None)
@@ -150,26 +150,93 @@ def h3_actor_profile(data, engine):
     groups.extend((group, "fsdp") for group in engine.device_mesh.get_all_groups())
     prof = start_h3_profile(
         directory,
-        "actor-update",
+        "actor-update-compute",
         tu.get(data, "h3_profile_rl_step"),
         groups,
         record_shapes=tu.get(data, "h3_profile_record_shapes"),
     )
     completed = False
     try:
-        with torch.profiler.record_function("h3/actor_update"):
+        with torch.profiler.record_function("h3/actor_update_compute"):
             yield
         completed = True
     finally:
-        stop_h3_profile(prof, completed=completed)
-        # Profiler callbacks retain their owner cyclically; release its trace before the next RL step.
-        del prof
-        gc.collect()
+        try:
+            stop_h3_profile(prof, completed=completed)
+        finally:
+            # TPA callbacks retain their owner cyclically. Release shape weakrefs before train-mode offload.
+            del prof
+            gc.collect()
+
+
+class H3RolloutProfile:
+    """Own one replica's request-counted window without retaining its exported profiler."""
+
+    def __init__(self, execute_model, directory, rl_step, group, record_shapes, request_start, request_end):
+        """Arm the existing full-request entrypoint; starting a collector waits for request_start."""
+        self.execute_model = execute_model
+        self.directory = directory
+        self.rl_step = rl_step
+        self.group = group
+        self.record_shapes = record_shapes
+        self.request_start = request_start
+        self.request_end = request_end
+        self.request_index = 0
+        self.profiler = None
+        self.completed = False
+
+    def execute_request(self, req, *args, **kwargs):
+        """Count complete worker requests and export immediately after the selected last request."""
+        self.request_index += 1
+        if self.request_index == self.request_start:
+            self.profiler = start_h3_profile(
+                self.directory,
+                "rollout-requests",
+                self.rl_step,
+                [(self.group, "tensor_model_parallel")],
+                record_shapes=self.record_shapes,
+            )
+            self.profiler.h3_identity.update(
+                request_start=self.request_start, request_end=self.request_end, requests=[]
+            )
+        if self.profiler is None:
+            return self.execute_model(req, *args, **kwargs)
+
+        request = {"ordinal": self.request_index, "request_id": req.request_id, "completed": False}
+        self.profiler.h3_identity["requests"].append(request)
+        try:
+            with torch.profiler.record_function(f"h3/rollout_request/{self.request_index}"):
+                output = self.execute_model(req, *args, **kwargs)
+            request["completed"] = True
+            return output
+        finally:
+            if not request["completed"] or self.request_index == self.request_end:
+                self.finish_capture(completed=request["completed"])
+
+    def finish_capture(self, completed):
+        """Drop every owned profiler reference before the worker executes another request or sleeps."""
+        prof, self.profiler = self.profiler, None
+        try:
+            stop_h3_profile(prof, completed=completed)
+            self.completed = completed
+        finally:
+            del prof
+            gc.collect()
+
+    def finish_generation(self, completed):
+        """Export an interrupted window and reject successful generations that missed the requested range."""
+        if self.profiler is not None:
+            self.finish_capture(completed=False)
+        if completed and not self.completed:
+            raise RuntimeError(
+                f"H3 rollout capture expected requests {self.request_start}..{self.request_end}, "
+                f"but only observed {self.request_index} requests without a complete trace"
+            )
 
 
 @contextmanager
 def h3_generation_profile(trainer):
-    """Capture complete TP replicas and reward workers only on their selected RL steps."""
+    """Arm one complete TP replica's bounded requests and optional reward windows on selected RL steps."""
     import ray
 
     directory = trainer.config.trainer.get("h3_comparison_profile_dir")
@@ -185,7 +252,10 @@ def h3_generation_profile(trainer):
         yield
         return
     root = Path(directory) / f"rl_step_{trainer.global_steps:04d}"
-    servers = trainer.llm_server_manager.server_handles if "rollout" in windows else []
+    servers = []
+    if "rollout" in windows:
+        window = windows["rollout"]
+        servers = [(window.replica, trainer.llm_server_manager.server_handles[window.replica])]
     rewards = trainer.reward_loop_manager.reward_loop_workers if "reward" in windows else []
     starts = [
         server.collective_rpc.remote(
@@ -194,9 +264,11 @@ def h3_generation_profile(trainer):
                 "directory": str(root / f"rollout_replica_{replica:03d}"),
                 "rl_step": trainer.global_steps,
                 "record_shapes": windows["rollout"].record_shapes,
+                "request_start": windows["rollout"].request_start,
+                "request_end": windows["rollout"].request_end,
             },
         )
-        for replica, server in enumerate(servers)
+        for replica, server in servers
     ]
     starts.extend(
         worker.start_h3_comparison_profile.remote(
@@ -212,7 +284,7 @@ def h3_generation_profile(trainer):
     finally:
         stops = [
             server.collective_rpc.remote("stop_h3_comparison_profile", kwargs={"completed": completed})
-            for server in servers
+            for replica, server in servers
         ]
         stops.extend(worker.stop_h3_comparison_profile.remote(completed) for worker in rewards)
         ray.get(stops)
@@ -232,6 +304,10 @@ def validate_h3_profiling(config):
             raise ValueError(f"Unsupported H3 TPA role: {window.role}")
         if not 0 < window.step <= config.trainer.total_training_steps:
             raise ValueError(f"H3 TPA {window.role} target must be a training RL step in this run")
+        if window.role == "rollout" and (window.replica < 0 or not 1 <= window.request_start <= window.request_end):
+            raise ValueError("H3 TPA rollout requires a nonnegative replica and an inclusive 1-based request range")
+        if window.role == "rollout" and config.actor_rollout_ref.rollout.step_execution:
+            raise ValueError("H3 TPA request windows require full-request execution, not step_execution")
         identity = (window.role, window.step)
         if identity in seen:
             raise ValueError(f"Duplicate H3 TPA window: {identity}")
