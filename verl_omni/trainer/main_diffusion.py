@@ -152,6 +152,9 @@ def run_diffusion(config, task_runner_class=None) -> None:
     validate_separate_config(config)
     enable_rl_insight(config)
     _validate_grm_reward_function(config)
+    from verl_omni.experiments.h3_determinism import h3_determinism_runtime_env
+
+    h3_runtime_env = h3_determinism_runtime_env(config)
     # Before ray.init() so actors inherit these via runtime_env.
     if _determinism_requested(config):
         _export_full_determinism_env(config)
@@ -166,7 +169,7 @@ def run_diffusion(config, task_runner_class=None) -> None:
         ray_init_kwargs = config.ray_kwargs.get("ray_init", {})
         runtime_env_kwargs = ray_init_kwargs.get("runtime_env", {})
 
-        runtime_env = OmegaConf.merge(default_runtime_env, runtime_env_kwargs)
+        runtime_env = OmegaConf.merge(default_runtime_env, runtime_env_kwargs, h3_runtime_env)
         ray_init_kwargs = OmegaConf.create({**ray_init_kwargs, "runtime_env": runtime_env})
         print(f"ray init kwargs: {ray_init_kwargs}")
         ray.init(**OmegaConf.to_container(ray_init_kwargs))
@@ -222,6 +225,10 @@ class TaskRunner:
     """
 
     def __init__(self):
+        """Initialize the controller policy after Ray has assigned this actor's resources."""
+        from verl_omni.experiments.h3_determinism import configure_h3_determinism
+
+        configure_h3_determinism("task-runner")
         self.role_worker_mapping = {}
         self.mapping = {}
 

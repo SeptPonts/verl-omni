@@ -114,11 +114,55 @@ Profile runs four steps in one continuous training job: step1 warms up, steps2/3
 capture both Actor and Rollout, and step4 checks unprofiled continuation. It does
 not capture Reward or run validation. Full validation remains in the quality run.
 Use two independent clean runs. Inputs preserve the existing seed42/n8 recipe;
-this integration does not add global seed initialization or full determinism.
+this integration does not add global seed initialization. Kernel determinism is
+an explicit opt-in described below.
 The manifest freezes the actual eight-worker StatefulDataLoader order, including
 its sampler-reset behavior. Every live pre-repeat batch is checked and recorded
 in `H3_RUN_DIR/input_batches.jsonl` before generation. Same input identities and
 request seeds do not promise identical generated tensors or rewards.
+
+## Opt-in H3 kernel determinism
+
+Set `H3_DETERMINISTIC=1` before the existing experiment launcher. The shell entry
+sets the device, receipt directory, and CUDA cuBLAS workspace before Python starts:
+
+```bash
+H3_DETERMINISTIC=1 bash verl_omni/experiments/run_h3_comparison.sh cuda quality resolve
+# Run only after the experiment's resource and training approval checks.
+H3_DETERMINISTIC=1 bash verl_omni/experiments/run_h3_comparison.sh cuda quality run
+```
+
+The default is off. When enabled, the driver and model-owning process constructors apply
+`torch.use_deterministic_algorithms(True, warn_only=False)` and select deterministic
+cuDNN/CNNL with benchmarking disabled. CUDA also uses
+`CUBLAS_WORKSPACE_CONFIG=:4096:8`. Each initialized process writes its flags and
+policy hash under `H3_RUN_DIR/determinism/`. Ray workers cover actor, rollout server,
+and reward roles; a separate dependency patch initializes spawned diffusion
+workers before device/model initialization. A Ray process setup hook must not
+import this application: Ray assigns actor device visibility afterward, so such
+an import can cache all cards before the single-card mask takes effect.
+
+This mode preserves seed derivation, RNG calls, training noise, `PYTHONHASHSEED`,
+NCCL/CNCL settings, cuDNN enablement, TF32, parallelism, and offload. Keep existing
+VeRL `full_determinism` fields false: that helper reseeds, changes communication
+settings, and disables cuDNN. Conflicting true values are rejected.
+
+The frozen B300 environment additionally needs the reviewed dependency patch in
+the parent context repository, `tools/h3_determinism/runtime.patch`. It forwards
+`deterministic=True` through the actual Diffusers FA4 and vLLM-Omni dense attention
+paths, and pins the actor Hub kernel to the baseline's recorded commit. Apply it
+only with its source-hash manifest; it is specific to the audited B300 versions.
+Do not apply that patch blindly to an MLU stack with different dependency versions.
+The CNNL policy branch alone does not establish MLU attention determinism.
+
+Strict mode fails on registered unsupported operations; it does not prove custom
+kernels or distributed training reproducible. Component and full-model validation
+remain separate gates. `resolve` verifies the configuration without exercising
+the worker constructors or kernels.
+
+```bash
+python -m pytest -q tests/experiments/test_h3_determinism_on_cpu.py --confcutdir=tests/experiments
+```
 
 ## One-generation persistent checkpoint backup
 

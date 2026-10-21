@@ -64,6 +64,10 @@ class OmniRewardLoopWorker(RewardLoopWorker):
         reward_router_address=None,
         reward_model_specs=None,
     ):
+        """Apply process policy before constructing the named reward executors."""
+        from verl_omni.experiments.h3_determinism import configure_h3_determinism
+
+        configure_h3_determinism("reward-worker")
         self.reward_model_specs = reward_model_specs or {}
         self.engine_reward_executors: dict[str, EngineRewardExecutor] = build_engine_reward_executors(
             self.reward_model_specs

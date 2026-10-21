@@ -152,6 +152,10 @@ class DiffusionAgentLoopWorker:
         teacher_client: dict[str, LLMServerClient] | None = None,
         reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
     ):
+        """Apply process policy before preparing rollout configs and model inputs."""
+        from verl_omni.experiments.h3_determinism import configure_h3_determinism
+
+        configure_h3_determinism("diffusion-agent-loop")
         self.config = config
         rollout_config = config.actor_rollout_ref.rollout
         model_config = config.actor_rollout_ref.model

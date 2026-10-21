@@ -159,6 +159,9 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         # remap their ZMQ ranks through this replica-level list.
         os.environ["VERL_ZMQ_BASE_VISIBLE_DEVICES"] = cuda_visible_devices
         self._generate_strategy.post_init(cuda_visible_devices)
+        from verl_omni.experiments.h3_determinism import configure_h3_determinism
+
+        configure_h3_determinism("rollout-http-server")
         self._lora_request_cache: LoRARequest | None | object = _LORA_REQUEST_CACHE_MISS
         self._lora_resolve_lock = asyncio.Lock()
         super()._post_init(cuda_visible_devices)

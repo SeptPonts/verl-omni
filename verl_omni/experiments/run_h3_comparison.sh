@@ -9,6 +9,7 @@ action=${3:?Specify resolve or run}
 : "${H3_INITIAL_LORA:?Set the immutable canonical-v2 directory}"
 : "${H3_EVALUATION_MANIFEST:?Set the frozen evaluation-manifest.json}"
 : "${H3_TRAINING_MANIFEST:?Set the frozen training-manifest.json}"
+source verl_omni/experiments/h3_determinism.sh
 checkpoint_dir=${H3_CHECKPOINT_DIR:-$H3_RUN_DIR/checkpoints}
 checkpoint_backup_dir=${H3_CHECKPOINT_BACKUP_DIR:-}
 if [[ "$mode" != quality && -n "$checkpoint_backup_dir" ]]; then

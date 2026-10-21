@@ -120,7 +120,11 @@ class TrainingWorker(Worker, DistProfilerExtension):
     """
 
     def __init__(self, config: TrainingWorkerConfig):
+        """Bind the worker and apply process policy before building its training engine."""
         Worker.__init__(self)
+        from verl_omni.experiments.h3_determinism import configure_h3_determinism
+
+        configure_h3_determinism("training-worker")
 
         from verl.workers.engine import BaseEngine, EngineRegistry
 
@@ -584,7 +588,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         teacher_key: Optional[str] = None,
         **kwargs,
     ):
+        """Bind the worker and apply process policy before actor or rollout model work."""
         Worker.__init__(self)
+        from verl_omni.experiments.h3_determinism import configure_h3_determinism
+
+        configure_h3_determinism("actor-rollout-worker")
         self.config = config
         self.distillation_config = distillation_config
         self.distillation_enabled = is_distillation_enabled(distillation_config)
