@@ -36,7 +36,8 @@ def get_non_ephemeral_free_port(address: str = "127.0.0.1") -> int:
     if lo <= 1024:
         raise RuntimeError(f"Ephemeral port range starts at {lo}; no non-privileged candidate ports below it.")
     candidates = range(1024, lo)
-    start = random.randrange(len(candidates))
+    # Port allocation must not share the model RNG seeded identically in every replica.
+    start = random.SystemRandom().randrange(len(candidates))
     for offset in range(len(candidates)):
         port = candidates[(start + offset) % len(candidates)]
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:

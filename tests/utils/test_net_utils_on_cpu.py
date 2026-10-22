@@ -13,6 +13,7 @@
 # limitations under the License.
 """CPU tests for the non-ephemeral MASTER_PORT picker."""
 
+import random
 import socket
 
 import pytest
@@ -32,6 +33,13 @@ def test_returns_bindable_port_below_ephemeral_range():
     assert 1024 <= port < lo
     holder = _bind("127.0.0.1", port)  # raises if the picker handed out a busy port
     holder.close()
+
+
+def test_port_selection_preserves_training_rng():
+    """Network resource allocation must not consume the seeded training RNG."""
+    before = random.getstate()
+    net_utils.get_non_ephemeral_free_port("127.0.0.1")
+    assert random.getstate() == before
 
 
 def test_skips_ports_already_bound(monkeypatch):
