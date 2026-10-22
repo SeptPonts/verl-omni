@@ -150,6 +150,14 @@ controller each use their component seed once. No Ray setup hook imports Torch
 before device binding. Per-process receipts record seed, actual Torch/backend
 flags, selected environment and policy hash under `H3_RUN_DIR/determinism/`.
 
+CPS uses one CPU generator per request with the existing `request_seed + 1` rule.
+H3 consumes this stream on CPU, records a SHA256 of the actual noise, and passes
+the transferred tensor into the scheduler as explicit `variance_noise`. The
+optional scheduler argument leaves existing callers on their original RNG path. Transition order stays video then audio, including
+existing draws at zero noise. Initial CPU noise, data shuffle, `data.seed`, Actor
+minibatch order, request seeds, TF32, topology and offload are otherwise unchanged.
+The mode does not promise bitwise GPU/MLU equivalence or reward batch invariance.
+
 The frozen H20 environment needs the parent context repository's
 `tools/h3_determinism/h20-strict-runtime.patch`, matched against its source SHA256
 manifest. It initializes the actual diffusion compute worker after device binding,
@@ -160,8 +168,8 @@ B300 `runtime.patch` belongs to the earlier kernel-only policy and must not be
 reused with this helper signature. FA4 and MLU runtime deployment need their own
 reviewed patches; this H20 patch does not implement those deployments.
 
-Off mode does not invoke this helper, reset RNG, or inject new launch environment
-variables. External environment settings remain the caller's
+Off mode does not invoke this helper, reset RNG, switch CPS to CPU, or inject new
+launch environment variables. External environment settings remain the caller's
 responsibility. Start each mode in a fresh process with its frozen environment.
 Source checks are not a real-training repeatability result; worker receipts and
 numerical results must be inspected after launch.

@@ -16,10 +16,15 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+import os
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Literal
 
 import torch
+from diffusers.utils.torch_utils import randn_tensor
 from vllm_omni.diffusion.models.minimax_h3.time_request import minimax_h3_time_shift_sigmas
 
 from verl_omni.pipelines.minimax_h3_diffusion_nft.common import (
@@ -108,11 +113,28 @@ def sample_h3_transition(
     if not 0 <= step < len(scheduler.timesteps):
         raise IndexError(f"MiniMax H3 scheduler step {step} is out of range.")
     timestep = scheduler.timesteps[step].expand(sample.shape[0])
+    variance_noise = None
+    if os.environ.get("H3_DETERMINISTIC") == "1" and prev_sample is None:
+        # H3 owns the shared CPU draw so the receipt hashes the noise actually consumed by the scheduler.
+        # Keep zero-noise draws and the caller's video/audio ordering unchanged.
+        variance_noise = randn_tensor(
+            h3_velocity.shape, generator=generator, device=torch.device("cpu"), dtype=torch.float32
+        )
+        receipt = {
+            "seed": generator.initial_seed(), "step": step, "shape": list(variance_noise.shape),
+            "dtype": str(variance_noise.dtype), "noise_level": noise_level,
+            "noise_sha256": hashlib.sha256(variance_noise.numpy().tobytes()).hexdigest(),
+        }
+        path = Path(os.environ["H3_DETERMINISM_DIR"]) / f"{os.getpid()}-cps-noise.jsonl"
+        with path.open("a") as output:
+            output.write(json.dumps(receipt) + "\n")
+        variance_noise = variance_noise.to(h3_velocity.device)
     return scheduler.sample_previous_step(
         sample=sample.float(),
         model_output=-h3_velocity.float(),
         timestep=timestep,
         generator=generator,
+        variance_noise=variance_noise,
         noise_level=noise_level,
         prev_sample=None if prev_sample is None else prev_sample.float(),
         sde_type=sde_type,

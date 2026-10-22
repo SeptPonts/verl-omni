@@ -158,6 +158,7 @@ class FlowMatchSDEDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
         return_logprobs: bool = True,
         return_sqrt_dt: bool = False,
         include_logprob_normalizer: bool = True,
+        variance_noise: Optional[torch.Tensor] = None,
     ):
         """
         Run a single SDE / CPS reverse step.
@@ -189,6 +190,8 @@ class FlowMatchSDEDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
                 (see `GRPOGuardLoss`).
             include_logprob_normalizer (`bool`, *optional*, defaults to True):
                 Whether to include Gaussian normalizer constants in log probabilities.
+            variance_noise (`torch.Tensor`, *optional*):
+                Explicit noise for this transition. When supplied, the caller owns its RNG draw.
         """
         assert sde_type in ["sde", "cps", "dance_sde"]
         assert sample.dtype == torch.float32
@@ -220,12 +223,13 @@ class FlowMatchSDEDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
             )
 
             if prev_sample is None:
-                variance_noise = randn_tensor(
-                    model_output.shape,
-                    generator=generator,
-                    device=model_output.device,
-                    dtype=model_output.dtype,
-                )
+                if variance_noise is None:
+                    variance_noise = randn_tensor(
+                        model_output.shape,
+                        generator=generator,
+                        device=model_output.device,
+                        dtype=model_output.dtype,
+                    )
                 prev_sample = prev_sample_mean + std_dev_t * torch.sqrt(-1 * dt) * variance_noise
 
             if return_logprobs:
@@ -255,12 +259,13 @@ class FlowMatchSDEDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
             )
 
             if prev_sample is None:
-                variance_noise = randn_tensor(
-                    model_output.shape,
-                    generator=generator,
-                    device=model_output.device,
-                    dtype=model_output.dtype,
-                )
+                if variance_noise is None:
+                    variance_noise = randn_tensor(
+                        model_output.shape,
+                        generator=generator,
+                        device=model_output.device,
+                        dtype=model_output.dtype,
+                    )
                 prev_sample = prev_sample_mean + std_dev_t * variance_noise
 
             if return_logprobs:
@@ -294,12 +299,13 @@ class FlowMatchSDEDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
             std_dev_t = noise_level * torch.sqrt(delta_t)
 
             if prev_sample is None:
-                variance_noise = randn_tensor(
-                    model_output.shape,
-                    generator=generator,
-                    device=model_output.device,
-                    dtype=model_output.dtype,
-                )
+                if variance_noise is None:
+                    variance_noise = randn_tensor(
+                        model_output.shape,
+                        generator=generator,
+                        device=model_output.device,
+                        dtype=model_output.dtype,
+                    )
                 prev_sample = prev_sample_mean + std_dev_t * variance_noise
 
             if return_logprobs:

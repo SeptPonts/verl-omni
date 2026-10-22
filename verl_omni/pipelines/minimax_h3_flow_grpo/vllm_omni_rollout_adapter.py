@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import math
+import os
 from collections.abc import Sequence
 from typing import Any
 
@@ -412,7 +413,9 @@ class MiniMaxH3PipelineWithLogProb(MiniMaxH3WeightSyncMixin, MiniMaxH3Pipeline):
             else:
                 order = torch.randperm(high - low, generator=step_generator)[:window_size].tolist()
                 selected = {low + index for index in order}
-        generator = torch.Generator(device=self.device).manual_seed(seed + 1)
+        # One continuous stream per request: every transition consumes video, then audio noise.
+        noise_device = "cpu" if os.environ.get("H3_DETERMINISTIC") == "1" else self.device
+        generator = torch.Generator(device=noise_device).manual_seed(seed + 1)
         current_latents = []
         next_latents = []
         log_probs = []
