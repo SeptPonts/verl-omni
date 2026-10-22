@@ -155,7 +155,7 @@ class DiffusionAgentLoopWorker:
         """Apply process policy before preparing rollout configs and model inputs."""
         from verl_omni.experiments.h3_determinism import configure_h3_determinism
 
-        configure_h3_determinism("diffusion-agent-loop")
+        configure_h3_determinism("diffusion-agent-loop", config.actor_rollout_ref.rollout.seed)
         self.config = config
         rollout_config = config.actor_rollout_ref.rollout
         model_config = config.actor_rollout_ref.model

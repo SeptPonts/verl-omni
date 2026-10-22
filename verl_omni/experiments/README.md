@@ -123,46 +123,48 @@ request seeds do not promise identical generated tensors or rewards.
 
 ## Opt-in H3 kernel determinism
 
-Set `H3_DETERMINISTIC=1` before the existing experiment launcher. The shell entry
-sets the device, receipt directory, and CUDA cuBLAS workspace before Python starts:
+Set `H3_DETERMINISTIC=1` before the experiment launcher. This now selects the
+strict accuracy policy; older runs used the kernel-only implementation archived
+with their source patches.
 
 ```bash
-H3_DETERMINISTIC=1 bash verl_omni/experiments/run_h3_comparison.sh cuda quality resolve
-# Run only after the experiment's resource and training approval checks.
 H3_DETERMINISTIC=1 bash verl_omni/experiments/run_h3_comparison.sh cuda quality run
 ```
 
-The default is off. When enabled, the driver and model-owning process constructors apply
-`torch.use_deterministic_algorithms(True, warn_only=False)` and select deterministic
-cuDNN/CNNL with benchmarking disabled. CUDA also uses
-`CUBLAS_WORKSPACE_CONFIG=:4096:8`. Each initialized process writes its flags and
-policy hash under `H3_RUN_DIR/determinism/`. Ray workers cover actor, rollout server,
-and reward roles; a separate dependency patch initializes spawned diffusion
-workers before device/model initialization. A Ray process setup hook must not
-import this application: Ray assigns actor device visibility afterward, so such
-an import can cache all cards before the single-card mask takes effect.
+The shell fixes `PYTHONHASHSEED=42` before Python starts, exports the full-determinism
+and batch-invariance switches, and selects cuBLAS `:16:8` plus NCCL Ring/Simple.
+The implementation reuses VeRL's `enable_full_determinism(seed)` in each owning
+process: `warn_only=True`, deterministic algorithms, and cuDNN disabled with
+benchmarking off. MLU additionally sets CNNL deterministic, without its unsupported
+benchmark setter. NCCL_DETERMINISTIC is recorded because the helper assigns it;
+its effectiveness as a library control has not been established. MLU launchers set
+`H3_CNCL_TUNER_DIR` to a frozen directory containing `libcncl-tuner-csv.so` and
+`ring.conf`. Strict mode exports both CNCL tuner paths before communicator creation
+and propagates them through Ray. The rules and the actual CNCL selection require
+target-specific verification; the SDK v1 plugin fixes topology and ring count,
+without a separate protocol output.
 
-This mode preserves seed derivation, RNG calls, training noise, `PYTHONHASHSEED`,
-NCCL/CNCL settings, cuDNN enablement, TF32, parallelism, and offload. Keep existing
-VeRL `full_determinism` fields false: that helper reseeds, changes communication
-settings, and disables cuDNN. Conflicting true values are rejected.
+Actor RNG initialization belongs to the FSDP engine, not both colocated worker
+wrappers. Rollout HTTP, actual spawned diffusion workers, reward workers and the
+controller each use their component seed once. No Ray setup hook imports Torch
+before device binding. Per-process receipts record seed, actual Torch/backend
+flags, selected environment and policy hash under `H3_RUN_DIR/determinism/`.
 
-The frozen B300 environment additionally needs the reviewed dependency patch in
-the parent context repository, `tools/h3_determinism/runtime.patch`. It forwards
-`deterministic=True` through the actual Diffusers FA4 and vLLM-Omni dense attention
-paths, and pins the actor Hub kernel to the baseline's recorded commit. Apply it
-only with its source-hash manifest; it is specific to the audited B300 versions.
-Do not apply that patch blindly to an MLU stack with different dependency versions.
-The CNNL policy branch alone does not establish MLU attention determinism.
+The frozen H20 environment needs the parent context repository's
+`tools/h3_determinism/h20-strict-runtime.patch`, matched against its source SHA256
+manifest. It initializes the actual diffusion compute worker after device binding,
+passes deterministic through the Actor FA3 varlen path and Rollout FA3 Hub functions,
+and preserves ordinary-mode call arguments. It is deployed in a private package
+copy; it does not modify the packages used by an ongoing profile run. The earlier
+B300 `runtime.patch` belongs to the earlier kernel-only policy and must not be
+reused with this helper signature. FA4 and MLU runtime deployment need their own
+reviewed patches; this H20 patch does not implement those deployments.
 
-Strict mode fails on registered unsupported operations; it does not prove custom
-kernels or distributed training reproducible. Component and full-model validation
-remain separate gates. `resolve` verifies the configuration without exercising
-the worker constructors or kernels.
-
-```bash
-python -m pytest -q tests/experiments/test_h3_determinism_on_cpu.py --confcutdir=tests/experiments
-```
+Off mode does not invoke this helper, reset RNG, or inject new launch environment
+variables. External environment settings remain the caller's
+responsibility. Start each mode in a fresh process with its frozen environment.
+Source checks are not a real-training repeatability result; worker receipts and
+numerical results must be inspected after launch.
 
 ## One-generation persistent checkpoint backup
 

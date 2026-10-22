@@ -140,9 +140,14 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
 
         self.rank = torch.distributed.get_rank()
 
+        # The engine owns Actor RNG initialization; colocated wrapper constructors do not reseed.
+        if os.environ.get("H3_DETERMINISTIC") == "1":
+            from verl_omni.experiments.h3_determinism import configure_h3_determinism
+
+            configure_h3_determinism("actor-engine", self.engine_config.seed)
         self._init_device_mesh()
 
-        if self.engine_config.full_determinism:
+        if self.engine_config.full_determinism and os.environ.get("H3_DETERMINISTIC") != "1":
             enable_full_determinism(seed=self.engine_config.seed)
 
         # set FSDP offload params

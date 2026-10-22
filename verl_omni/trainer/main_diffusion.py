@@ -228,7 +228,8 @@ class TaskRunner:
         """Initialize the controller policy after Ray has assigned this actor's resources."""
         from verl_omni.experiments.h3_determinism import configure_h3_determinism
 
-        configure_h3_determinism("task-runner")
+        if os.environ.get("H3_DETERMINISTIC") == "1":
+            configure_h3_determinism("task-runner", int(os.environ["VERL_SEED"]))
         self.role_worker_mapping = {}
         self.mapping = {}
 

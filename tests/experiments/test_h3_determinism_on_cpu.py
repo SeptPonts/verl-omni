@@ -1,4 +1,4 @@
-"""Verify kernel-policy propagation and preservation of RNG and communication state."""
+"""Check the H3 strict policy contract and the ordinary-mode boundary on CPU."""
 
 import importlib.util
 import json
@@ -20,139 +20,132 @@ POLICY = ROOT / "verl_omni/experiments/h3_determinism.py"
 
 @pytest.fixture
 def policy(monkeypatch, tmp_path):
-    """Load the experiment without application registration and restore process flags afterward."""
+    """Load the real policy and restore environment, RNG and backend flags after each check."""
     spec = importlib.util.spec_from_file_location("h3_determinism", POLICY)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     enabled = torch.are_deterministic_algorithms_enabled()
     warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
     cudnn = (torch.backends.cudnn.deterministic, torch.backends.cudnn.benchmark, torch.backends.cudnn.enabled)
+    environment = dict(os.environ)
+    python_rng, numpy_rng, torch_rng = random.getstate(), np.random.get_state(), torch.get_rng_state()
     monkeypatch.setenv("H3_DETERMINISTIC", "1")
     monkeypatch.setenv("H3_DETERMINISTIC_DEVICE", "cuda")
     monkeypatch.setenv("H3_DETERMINISM_DIR", str(tmp_path / "receipts"))
-    monkeypatch.setenv("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
-    monkeypatch.setenv("TORCHINDUCTOR_CACHE_DIR", str(tmp_path / "inductor"))
+    monkeypatch.setenv("CUBLAS_WORKSPACE_CONFIG", ":16:8")
+    monkeypatch.setenv("VERL_FULL_DETERMINISM", "1")
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
     yield module
     torch.use_deterministic_algorithms(enabled, warn_only=warn_only)
     torch.backends.cudnn.deterministic, torch.backends.cudnn.benchmark, torch.backends.cudnn.enabled = cudnn
+    random.setstate(python_rng)
+    np.random.set_state(numpy_rng)
+    torch.set_rng_state(torch_rng)
+    os.environ.clear()
+    os.environ.update(environment)
 
 
-def test_cuda_policy_preserves_rng_collectives_and_precision(policy, monkeypatch):
-    """Changing kernels must not reseed, select NCCL algorithms, disable cuDNN, or change TF32."""
-    monkeypatch.setenv("NCCL_ALGO", "Tree")
-    monkeypatch.setenv("NCCL_PROTO", "LL128")
-    monkeypatch.setenv("PYTHONHASHSEED", "123")
-    python_rng, numpy_rng, torch_rng = random.getstate(), np.random.get_state(), torch.get_rng_state().clone()
-    environment = dict(os.environ)
-    enabled, tf32 = torch.backends.cudnn.enabled, torch.backends.cuda.matmul.allow_tf32
-    state = policy.configure_h3_determinism("actor")
-    assert state["deterministic_algorithms"] is True and state["warn_only"] is False
+def test_strict_policy_uses_official_seed_and_flags(policy):
+    """Exercise the installed official helper, not a copied or mocked implementation."""
+    state = policy.configure_h3_determinism("actor-engine", 42)
+    assert state["seed"] == 42
+    assert state["deterministic_algorithms"] is True and state["warn_only"] is True
     assert state["backend_deterministic"] is True and state["backend_benchmark"] is False
-    assert torch.backends.cudnn.enabled == enabled
-    assert torch.backends.cuda.matmul.allow_tf32 == tf32
-    assert dict(os.environ) == environment
-    assert random.getstate() == python_rng
-    actual_numpy_rng = np.random.get_state()
-    assert actual_numpy_rng[0] == numpy_rng[0]
-    assert np.array_equal(actual_numpy_rng[1], numpy_rng[1])
-    assert actual_numpy_rng[2:] == numpy_rng[2:]
-    assert torch.equal(torch.get_rng_state(), torch_rng)
-    receipt = Path(os.environ["H3_DETERMINISM_DIR"]) / f"{os.getpid()}-actor.json"
+    assert state["cudnn_enabled"] is False
+    assert os.environ["CUBLAS_WORKSPACE_CONFIG"] == ":16:8"
+    assert os.environ["NCCL_ALGO"] == "Ring" and os.environ["NCCL_PROTO"] == "Simple"
+    assert random.random() == random.Random(42).random()
+    assert np.random.rand() == np.random.RandomState(42).rand()
+    assert torch.equal(torch.rand(4), torch.rand(4, generator=torch.Generator().manual_seed(42)))
+    receipt = Path(os.environ["H3_DETERMINISM_DIR"]) / f"{os.getpid()}-actor-engine.json"
     assert json.loads(receipt.read_text()) == state
 
 
-def test_disabled_policy_is_noop(policy, monkeypatch):
-    """The ordinary experiment must keep flags, environment, and filesystem untouched."""
+def test_disabled_policy_preserves_rng_environment_and_flags(policy, monkeypatch):
+    """Ordinary training must not reseed, write receipts or overwrite external settings."""
     monkeypatch.setenv("H3_DETERMINISTIC", "0")
     torch.use_deterministic_algorithms(False)
     environment = dict(os.environ)
-    assert policy.configure_h3_determinism("actor") is None
+    python_rng, torch_rng = random.getstate(), torch.get_rng_state().clone()
+    assert policy.configure_h3_determinism("actor-engine", 42) is None
     assert policy.h3_determinism_runtime_env(None) == {}
     assert torch.are_deterministic_algorithms_enabled() is False
     assert dict(os.environ) == environment
+    assert random.getstate() == python_rng and torch.equal(torch.get_rng_state(), torch_rng)
     assert not Path(os.environ["H3_DETERMINISM_DIR"]).exists()
 
 
-def test_mlu_policy_sets_cnnl_without_cuda_side_effects(policy, monkeypatch):
-    """A mocked MLU backend checks dispatch only; this is not an MLU kernel validation."""
+def test_mlu_policy_does_not_write_unsupported_benchmark(policy, monkeypatch):
+    """Check CNNL policy dispatch only; this mocked backend cannot validate MLU kernels."""
     monkeypatch.setenv("H3_DETERMINISTIC_DEVICE", "mlu")
     monkeypatch.setitem(sys.modules, "torch_mlu", ModuleType("torch_mlu"))
     cnnl = SimpleNamespace(deterministic=False, benchmark=True)
     monkeypatch.setattr(torch.backends, "cnnl", cnnl, raising=False)
-    before = (torch.backends.cudnn.deterministic, torch.backends.cudnn.benchmark, torch.backends.cudnn.enabled)
-    state = policy.configure_h3_determinism("reward")
-    assert cnnl.deterministic is True and cnnl.benchmark is False
-    assert state["device_type"] == "mlu" and state["warn_only"] is False
-    assert (torch.backends.cudnn.deterministic, torch.backends.cudnn.benchmark, torch.backends.cudnn.enabled) == before
+    state = policy.configure_h3_determinism("reward-worker", 42)
+    assert cnnl.deterministic is True and cnnl.benchmark is True
+    assert state["device_type"] == "mlu" and state["warn_only"] is True
 
 
-@pytest.mark.parametrize(
-    "path",
-    [
-        "actor_rollout_ref.actor.fsdp_config.full_determinism",
-        "actor_rollout_ref.ref.fsdp_config.full_determinism",
-        "actor_rollout_ref.rollout.full_determinism",
-        "reward.reward_model.rollout.full_determinism",
-    ],
-)
-def test_reseeding_helper_is_rejected(policy, path):
-    """Reject the existing helper because its seed and communication changes violate this experiment."""
-    config = OmegaConf.create({"trainer": {"device": "cuda"}})
-    OmegaConf.update(config, path, True, force_add=True)
-    with pytest.raises(ValueError, match="preserve RNG and communication"):
-        policy.h3_determinism_runtime_env(config)
-
-
-def test_runtime_env_preserves_config_and_copies_only_kernel_policy(policy):
-    """Propagate inputs without a setup hook that would initialize devices before Ray assigns them."""
-    config = OmegaConf.create({"trainer": {"device": "cuda"}, "data": {"seed": 30}})
+def test_runtime_env_keeps_data_seed_independent(policy):
+    """Propagate complete strict settings while preserving the seed30 data schedule."""
+    config = OmegaConf.create({
+        "trainer": {"device": "cuda"}, "data": {"seed": 30},
+        "actor_rollout_ref": {"actor": {"fsdp_config": {"seed": 42}}, "rollout": {"seed": 42}},
+    })
     before = OmegaConf.to_container(config)
     runtime = policy.h3_determinism_runtime_env(config)
     assert "worker_process_setup_hook" not in runtime
-    assert set(runtime["env_vars"]) == {
-        "H3_DETERMINISTIC",
-        "H3_DETERMINISTIC_DEVICE",
-        "H3_DETERMINISM_DIR",
-        "CUBLAS_WORKSPACE_CONFIG",
-    }
+    assert runtime["env_vars"]["NCCL_PROTO"] == "Simple"
+    assert runtime["env_vars"]["VERL_FULL_DETERMINISM"] == "1"
+    assert runtime["env_vars"]["VERL_SEED"] == "42"
     assert OmegaConf.to_container(config) == before
 
 
-def test_wrong_workspace_fails_before_kernel_work(policy, monkeypatch):
-    """Catch the old helper's workspace overwrite rather than report a falsely configured launch."""
-    monkeypatch.setenv("CUBLAS_WORKSPACE_CONFIG", ":16:8")
+def test_wrong_workspace_fails_before_compute(policy, monkeypatch):
+    """Reject a stale kernel-only launcher before any model work."""
+    monkeypatch.setenv("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
     with pytest.raises(ValueError, match="before Python initialization"):
-        policy.configure_h3_determinism("actor")
+        policy.configure_h3_determinism("actor-engine", 42)
 
 
-def test_fresh_python_requires_its_own_policy(policy):
-    """Prove a new interpreter needs explicit initialization even when its parent is strict."""
-    policy.configure_h3_determinism("parent")
-    script = f"""
-import importlib.util, json, torch
-spec = importlib.util.spec_from_file_location('h3_determinism', {str(POLICY)!r})
-module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(module)
-before = torch.are_deterministic_algorithms_enabled()
-state = module.configure_h3_determinism('child')
-print(json.dumps({{'before': before, 'after': state['deterministic_algorithms'], 'warn_only': state['warn_only']}}))
-"""
-    result = subprocess.run([sys.executable, "-c", script], check=True, capture_output=True, text=True)
-    assert json.loads(result.stdout) == {"before": False, "after": True, "warn_only": False}
+def test_mlu_runtime_env_carries_tuner_paths(policy, monkeypatch, tmp_path):
+    """Keep the tested CNCL plugin and rules available in actual Ray workers."""
+    monkeypatch.setenv("H3_DETERMINISTIC_DEVICE", "mlu")
+    monkeypatch.setenv("CNCL_TUNER_PLUGIN", str(tmp_path / "libcncl-tuner-csv.so"))
+    monkeypatch.setenv("CNCL_TUNER_CONFIG_FILE", str(tmp_path / "ring.conf"))
+    monkeypatch.setitem(sys.modules, "torch_mlu", ModuleType("torch_mlu"))
+    monkeypatch.setattr(torch.backends, "cnnl", SimpleNamespace(deterministic=False, benchmark=False), raising=False)
+    config = OmegaConf.create({
+        "trainer": {"device": "mlu"},
+        "actor_rollout_ref": {"actor": {"fsdp_config": {"seed": 42}}, "rollout": {"seed": 42}},
+    })
+    environment = policy.h3_determinism_runtime_env(config)["env_vars"]
+    assert environment["CNCL_TUNER_PLUGIN"] == str(tmp_path / "libcncl-tuner-csv.so")
+    assert environment["CNCL_TUNER_CONFIG_FILE"] == str(tmp_path / "ring.conf")
 
 
-@pytest.mark.parametrize("platform", ["cuda", "mlu"])
-def test_shell_policy_does_not_change_seed_or_collectives(tmp_path, platform):
-    """Check the real shell source before Python startup for both platforms."""
+@pytest.mark.parametrize("enabled", ["0", "1"])
+def test_shell_policy_is_selected_before_python(tmp_path, enabled):
+    """Strict mode owns its environment; off mode leaves an external environment unchanged."""
     env = {
-        **os.environ,
-        "H3_DETERMINISTIC": "1",
-        "H3_RUN_DIR": str(tmp_path),
-        "PYTHONHASHSEED": "19",
-        "NCCL_ALGO": "Tree",
-        "CUBLAS_WORKSPACE_CONFIG": ":16:8",
+        **os.environ, "H3_DETERMINISTIC": enabled, "H3_RUN_DIR": str(tmp_path),
+        "PYTHONHASHSEED": "19", "NCCL_ALGO": "Tree", "NCCL_PROTO": "LL128",
+        "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
     }
-    script = f"platform={platform}\nsource verl_omni/experiments/h3_determinism.sh\n"
-    script += 'printf \'%s\\n\' "$PYTHONHASHSEED" "$NCCL_ALGO" "$CUBLAS_WORKSPACE_CONFIG" "$H3_DETERMINISTIC_DEVICE"'
+    script = "platform=cuda\nsource verl_omni/experiments/h3_determinism.sh\n"
+    script += "printf '%s\\n' \"$PYTHONHASHSEED\" \"$NCCL_ALGO\" \"$NCCL_PROTO\" \"$CUBLAS_WORKSPACE_CONFIG\""
     result = subprocess.run(["bash", "-c", script], cwd=ROOT, env=env, check=True, capture_output=True, text=True)
-    assert result.stdout.splitlines() == ["19", "Tree", ":4096:8" if platform == "cuda" else ":16:8", platform]
+    assert result.stdout.splitlines() == (["42", "Ring", "Simple", ":16:8"] if enabled == "1" else ["19", "Tree", "LL128", ":4096:8"])
+
+
+@pytest.mark.parametrize("enabled", ["0", "1"])
+def test_mlu_shell_tuner_boundary(tmp_path, enabled):
+    """Select the frozen tuner only in strict mode and preserve external settings otherwise."""
+    env = {**os.environ, "H3_DETERMINISTIC": enabled, "H3_RUN_DIR": str(tmp_path),
+           "H3_CNCL_TUNER_DIR": str(tmp_path / "tuner"),
+           "CNCL_TUNER_PLUGIN": "external-plugin", "CNCL_TUNER_CONFIG_FILE": "external-rules"}
+    script = "platform=mlu\nsource verl_omni/experiments/h3_determinism.sh\n"
+    script += "printf '%s\\n' \"$CNCL_TUNER_PLUGIN\" \"$CNCL_TUNER_CONFIG_FILE\""
+    result = subprocess.run(["bash", "-c", script], cwd=ROOT, env=env, check=True, capture_output=True, text=True)
+    assert result.stdout.splitlines() == ([str(tmp_path / "tuner/libcncl-tuner-csv.so"), str(tmp_path / "tuner/ring.conf")]
+                                         if enabled == "1" else ["external-plugin", "external-rules"])

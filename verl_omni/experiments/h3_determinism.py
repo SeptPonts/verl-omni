@@ -1,4 +1,4 @@
-"""Opt-in H3 kernel determinism without changing RNG or collective configuration."""
+"""Opt-in H3 strict accuracy policy with explicit process initialization ownership."""
 
 import hashlib
 import json
@@ -8,17 +8,18 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 
-def configure_h3_determinism(role):
-    """Apply kernel policy after Ray binds devices and before this process loads models."""
+def configure_h3_determinism(role, seed):
+    """Initialize one compute process after device binding, using its component seed."""
     if os.environ.get("H3_DETERMINISTIC") != "1":
         return None
 
     import torch
+    from verl.workers.engine.utils import enable_full_determinism
 
     device = os.environ["H3_DETERMINISTIC_DEVICE"]
     if device == "cuda":
-        if os.environ.get("CUBLAS_WORKSPACE_CONFIG") != ":4096:8":
-            raise ValueError("Start H3 with CUBLAS_WORKSPACE_CONFIG=:4096:8 before Python initialization")
+        if os.environ.get("CUBLAS_WORKSPACE_CONFIG") != ":16:8":
+            raise ValueError("Start H3 with CUBLAS_WORKSPACE_CONFIG=:16:8 before Python initialization")
         backend = torch.backends.cudnn
     elif device == "mlu":
         import torch_mlu  # noqa: F401 -- registers torch.backends.cnnl in this process
@@ -27,15 +28,16 @@ def configure_h3_determinism(role):
     else:
         raise ValueError(f"H3 deterministic experiments support cuda or mlu, received {device!r}")
 
-    torch.use_deterministic_algorithms(True, warn_only=False)
-    backend.deterministic = True
-    backend.benchmark = False
+    enable_full_determinism(seed=seed)
+    if device == "mlu":
+        backend.deterministic = True
     state = {
         "observed_at": datetime.now(UTC).isoformat(),
         "pid": os.getpid(),
         "parent_pid": os.getppid(),
         "process_name": multiprocessing.current_process().name,
         "role": role,
+        "seed": seed,
         "rank": os.environ.get("RANK"),
         "local_rank": os.environ.get("LOCAL_RANK"),
         "device_type": device,
@@ -49,6 +51,11 @@ def configure_h3_determinism(role):
             name: os.environ.get(name)
             for name in (
                 "H3_DETERMINISTIC",
+                "VERL_FULL_DETERMINISM",
+                "VERL_SEED",
+                "VLLM_BATCH_INVARIANT",
+                "FLASH_ATTENTION_DETERMINISTIC",
+                "VERL_DISABLE_FLASH_ATTN_CE",
                 "CUBLAS_WORKSPACE_CONFIG",
                 "PYTHONHASHSEED",
                 "NCCL_ALGO",
@@ -56,6 +63,8 @@ def configure_h3_determinism(role):
                 "NCCL_DETERMINISTIC",
                 "CNCL_ALGO",
                 "CNCL_PROTO",
+                "CNCL_TUNER_PLUGIN",
+                "CNCL_TUNER_CONFIG_FILE",
                 "CNNL_INTERNAL_OVERRIDE_RAND_RNG_TYPE",
                 "CUDA_VISIBLE_DEVICES",
                 "MLU_VISIBLE_DEVICES",
@@ -73,31 +82,27 @@ def configure_h3_determinism(role):
 
 
 def h3_determinism_runtime_env(config):
-    """Validate the kernel-only contract and propagate policy inputs to model workers."""
+    """Propagate strict launch settings without an early Ray setup-hook device import."""
     if os.environ.get("H3_DETERMINISTIC") != "1":
         return {}
 
     from omegaconf import OmegaConf
 
-    # VeRL's full_determinism reseeds RNG, changes NCCL, and disables cuDNN.
-    # The H3 experiment deliberately owns only the kernel policy.
-    for path in (
-        "actor_rollout_ref.actor.fsdp_config.full_determinism",
-        "actor_rollout_ref.ref.fsdp_config.full_determinism",
-        "actor_rollout_ref.rollout.full_determinism",
-        "reward.reward_model.rollout.full_determinism",
-    ):
-        if OmegaConf.select(config, path, default=False):
-            raise ValueError(f"H3 kernel determinism requires {path}=false to preserve RNG and communication")
     if config.trainer.device != os.environ["H3_DETERMINISTIC_DEVICE"]:
         raise ValueError("H3_DETERMINISTIC_DEVICE must match trainer.device")
     if OmegaConf.select(config, "ray_kwargs.ray_init.runtime_env.worker_process_setup_hook") is not None:
         raise ValueError("H3 determinism requires no Ray setup hook before per-actor device binding")
 
-    configure_h3_determinism("driver")
-    names = ["H3_DETERMINISTIC", "H3_DETERMINISTIC_DEVICE", "H3_DETERMINISM_DIR"]
-    if config.trainer.device == "cuda":
-        names.append("CUBLAS_WORKSPACE_CONFIG")
+    configure_h3_determinism("driver", config.actor_rollout_ref.actor.fsdp_config.seed)
+    os.environ["VERL_SEED"] = str(config.actor_rollout_ref.rollout.seed)
+    names = [
+        "H3_DETERMINISTIC", "H3_DETERMINISTIC_DEVICE", "H3_DETERMINISM_DIR",
+        "PYTHONHASHSEED", "VERL_SEED", "VERL_FULL_DETERMINISM", "VLLM_BATCH_INVARIANT",
+        "CUBLAS_WORKSPACE_CONFIG", "FLASH_ATTENTION_DETERMINISTIC",
+        "NCCL_DETERMINISTIC", "NCCL_ALGO", "NCCL_PROTO", "VERL_DISABLE_FLASH_ATTN_CE",
+    ]
+    if config.trainer.device == "mlu":
+        names.extend(["CNCL_TUNER_PLUGIN", "CNCL_TUNER_CONFIG_FILE"])
     # Ray runs its process setup hook before assigning an actor's visible devices.
     # Importing the accelerator there caches all cards; constructors own policy setup.
     return {"env_vars": {name: os.environ[name] for name in names}}

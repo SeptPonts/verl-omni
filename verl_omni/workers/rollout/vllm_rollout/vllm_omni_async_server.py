@@ -148,7 +148,12 @@ class vLLMOmniHttpServer(vLLMHttpServer):
                 config=self.config.profiler if profiler.config is not None else None,
                 tool_config=profiler.tool_config,
             )
-        if getattr(self.config, "full_determinism", False):
+        if os.environ.get("H3_DETERMINISTIC") == "1":
+            from verl_omni.experiments.h3_determinism import configure_h3_determinism
+
+            configure_h3_determinism("rollout-http-server", self.config.seed)
+            os.environ["VERL_SEED"] = str(self.config.seed)
+        elif getattr(self.config, "full_determinism", False):
             from verl.workers.engine.utils import enable_full_determinism
 
             rollout_seed = getattr(self.config, "seed", 42)
@@ -159,9 +164,6 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         # remap their ZMQ ranks through this replica-level list.
         os.environ["VERL_ZMQ_BASE_VISIBLE_DEVICES"] = cuda_visible_devices
         self._generate_strategy.post_init(cuda_visible_devices)
-        from verl_omni.experiments.h3_determinism import configure_h3_determinism
-
-        configure_h3_determinism("rollout-http-server")
         self._lora_request_cache: LoRARequest | None | object = _LORA_REQUEST_CACHE_MISS
         self._lora_resolve_lock = asyncio.Lock()
         super()._post_init(cuda_visible_devices)
