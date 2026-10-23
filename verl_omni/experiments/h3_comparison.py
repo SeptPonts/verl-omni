@@ -95,8 +95,8 @@ def validate_h3_comparison(config):
             if not path.is_file():
                 raise FileNotFoundError(path)
     if snapshots:
-        if config.trainer.save_freq != 10:
-            raise ValueError("H3 snapshots at steps 10/20/30/40/50 require trainer.save_freq=10")
+        if config.trainer.save_freq <= 0 or any(step % config.trainer.save_freq for step in SNAPSHOT_STEPS[1:]):
+            raise ValueError("H3 snapshot steps must be multiples of positive trainer.save_freq")
         if Path(snapshots).resolve().is_relative_to(Path(config.trainer.default_local_dir).resolve()):
             raise ValueError("H3 LoRA snapshots must live outside the rotating checkpoint directory")
 
