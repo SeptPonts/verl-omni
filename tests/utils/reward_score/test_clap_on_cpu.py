@@ -292,3 +292,65 @@ async def test_consumer_isolates_invalid_audio_and_resamples_valid_requests(monk
     assert resample_calls == [(24_000, 48_000)]
     assert len(processor.batches) == 1
     assert len(processor.batches[0][0]) == 2
+
+
+@pytest.mark.parametrize("full_determinism", ["1", "0", None])
+@pytest.mark.asyncio
+async def test_dynamic_batching_does_not_depend_on_determinism_flag(monkeypatch, full_determinism):
+    """The scheduler, not an import-time environment flag, selects fixed batches."""
+    if full_determinism is None:
+        monkeypatch.delenv("VERL_FULL_DETERMINISM", raising=False)
+    else:
+        monkeypatch.setenv("VERL_FULL_DETERMINISM", full_determinism)
+    scorer = _load_scorer_module()
+    _install_fake_torchaudio(monkeypatch)
+    processor = _FakeProcessor()
+    monkeypatch.setattr(scorer, "_load_clap", lambda model_name_or_path, device: (_FakeModel(), processor))
+    state = scorer._get_batching_state()
+    results = await asyncio.gather(*(scorer.compute_score(**request) for request in batch_requests(33)))
+    await _stop_consumer(state)
+    assert [len(prompts) for prompts, _ in processor.batches] == [16, 16, 1]
+    assert len(results) == 33
+
+
+def batch_requests(size):
+    """Build ordered scorer inputs with a unique waveform per row."""
+    return [
+        {
+            "data_source": "test",
+            "solution_image": None,
+            "ground_truth": "right",
+            "extra_info": {"audio": torch.tensor([1.0, float(index)]), "audio_sample_rate": 48_000},
+            "device": "cpu",
+        }
+        for index in range(size)
+    ]
+
+
+@pytest.mark.parametrize("size", [1, 16, 33])
+@pytest.mark.asyncio
+async def test_explicit_batch_preserves_membership_without_queue(monkeypatch, size):
+    """A complete batch must reach the model once, even above the dynamic cap."""
+    _install_fake_torchaudio(monkeypatch)
+    processor = _FakeProcessor()
+    monkeypatch.setattr(clap, "_load_clap", lambda model_name_or_path, device: (_FakeModel(), processor))
+    results = await clap.compute_score_batch(batch_requests(size))
+    assert [len(prompts) for prompts, _ in processor.batches] == [size]
+    assert [float(audio[1]) for _, batch in processor.batches for audio in batch] == list(range(size))
+    assert [result["score"] for result in results] == pytest.approx([(1 + index**2) ** -0.5 for index in range(size)])
+    assert [result["source_sample_rate"] for result in results] == [48_000] * size
+
+
+@pytest.mark.asyncio
+async def test_explicit_batch_preserves_invalid_row_position(monkeypatch):
+    """Invalid audio occupies its own result slot without losing valid scores."""
+    _install_fake_torchaudio(monkeypatch)
+    processor = _FakeProcessor()
+    monkeypatch.setattr(clap, "_load_clap", lambda model_name_or_path, device: (_FakeModel(), processor))
+    requests = batch_requests(3)
+    requests[1]["extra_info"].pop("audio")
+    results = await clap.compute_score_batch(requests)
+    assert results[0]["score"] == pytest.approx(1.0)
+    assert isinstance(results[1], KeyError)
+    assert results[2]["score"] == pytest.approx(5**-0.5)
+    assert [float(audio[1]) for _, batch in processor.batches for audio in batch] == [0, 2]

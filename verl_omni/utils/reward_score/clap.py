@@ -234,3 +234,22 @@ async def compute_score(
     await _ensure_consumer(state)
     score, source_rate = await future
     return {"score": score, "source_sample_rate": source_rate}
+
+
+async def compute_score_batch(requests: list[dict]) -> list[dict | Exception]:
+    """Score the supplied batch directly, preserving row results and failures."""
+    batch = [
+        (
+            request["ground_truth"] or "",
+            request["extra_info"],
+            request.get("model_name_or_path", _DEFAULT_MODEL),
+            request.get("device") or get_device_name(),
+            None,
+        )
+        for request in requests
+    ]
+    results = await asyncio.get_running_loop().run_in_executor(None, _score_batch, batch)
+    return [
+        result if isinstance(result, Exception) else {"score": result[0], "source_sample_rate": result[1]}
+        for result in results
+    ]
