@@ -17,6 +17,7 @@ import inspect
 import logging
 from abc import ABC, abstractmethod
 from collections import ChainMap
+from functools import partial
 
 import torch
 from verl import DataProto
@@ -155,79 +156,62 @@ class MultiRewardManager(RewardManagerBase, ABC):
     async def _build_reward_kwargs(self, data_item: DataProto) -> dict:
         """Build scorer kwargs for one sample in a modality-specific subclass."""
 
-    async def _run_multi_reward(self, all_kwargs: dict) -> dict:
-        """Execute configured reward terms and preserve their weighted outputs."""
-        combined_score = 0.0
-        reward_extra_info = {}
+    def prepare_reward_requests(self, sub: dict, requests: list[dict]) -> list[dict]:
+        """Bind term configuration and model access to ordered sample inputs."""
+        extra_args = dict(sub["extra_args"])
+        model_name = sub["model"]
+        if model_name is not None:
+            executor = self._engine_reward_executors.get(model_name)
+            if executor is not None:
+                if sub["use_rollout_sampling_params"] and "sampling_params" not in extra_args:
+                    model = get_reward_model_entries(self.config)[model_name]
+                    rollout = ChainMap(model.get("rollout") or {}, self.config.reward.reward_model.get("rollout") or {})
+                    extra_args["sampling_params"] = _sampling_params_from_rollout(rollout)
+            else:
+                executor = self._native_reward_executors.get(model_name)
+            if executor is None:
+                raise RuntimeError(f"Reward model {model_name!r} is not available in this worker")
+            reward_kwargs = getattr(executor, "reward_kwargs", None)
+            if reward_kwargs is None:
+                raise RuntimeError(f"Reward model {model_name!r} cannot be used with a reward function")
+            extra_args.update(reward_kwargs())
+        return [_filter_kwargs({**request, **extra_args}, sub["sig"]) for request in requests]
 
+    async def score_reward_requests(self, requests: list[dict]) -> list[dict]:
+        """Execute terms in configuration order and retain each sample's metrics."""
+        outputs = [{"reward_score": 0.0, "reward_extra_info": {}} for _ in requests]
         for sub in self._sub_rewards:
             key = sub["key"]
-            fn = sub["fn"]
-            weight = sub["weight"]
-            required = sub["required"]
-            sig = sub["sig"]
-            is_async = sub["is_async"]
-            extra_args = sub["extra_args"]
-            model_name = sub["model"]
-
-            # Merge per-reward extra config fields into kwargs
-            sub_kwargs = {**all_kwargs, **extra_args}
-            filtered_kwargs = _filter_kwargs(sub_kwargs, sig) if sig is not None else {}
-
-            if model_name is not None:
-                executor = self._engine_reward_executors.get(model_name)
-                if executor is not None:
-                    if sub["use_rollout_sampling_params"] and "sampling_params" not in extra_args:
-                        model = get_reward_model_entries(self.config)[model_name]
-                        rollout = ChainMap(
-                            model.get("rollout") or {}, self.config.reward.reward_model.get("rollout") or {}
-                        )
-                        sub_kwargs["sampling_params"] = _sampling_params_from_rollout(rollout)
-                else:
-                    executor = self._native_reward_executors.get(model_name)
-                if executor is None:
-                    raise RuntimeError(f"Reward model {model_name!r} is not available in this worker")
-                reward_kwargs = getattr(executor, "reward_kwargs", None)
-                if reward_kwargs is None:
-                    raise RuntimeError(f"Reward model {model_name!r} cannot be used with a reward function")
-                filtered_kwargs = _filter_kwargs({**sub_kwargs, **reward_kwargs()}, sig)
-
-            try:
-                if is_async:
-                    result = await fn(**filtered_kwargs)
-                else:
-                    result = await self.loop.run_in_executor(None, lambda f=fn, kw=filtered_kwargs: f(**kw))
-
-                if isinstance(result, dict):
-                    score = float(result["score"])
-                    for rk, rv in result.items():
-                        if rk == "score":
-                            continue
-                        reward_extra_info[f"reward/{key}/{rk}"] = rv
-                else:
-                    score = float(result)
-            except Exception as e:
-                if required:
-                    raise RuntimeError(f"Required sub-reward '{key}' failed: {e}") from e
-                logger.exception(
-                    "Sub-reward '%s' raised an exception: %s. Contributing 0 to weighted sum.",
-                    key,
-                    e,
-                )
-                reward_extra_info[f"reward/{key}/errors"] = 1
-                score = 0.0
-
-            reward_extra_info[f"reward/{key}"] = score
-            combined_score += weight * score
-
-        reward_extra_info["reward/combined"] = combined_score
-        return {"reward_score": combined_score, "reward_extra_info": reward_extra_info}
+            term_requests = self.prepare_reward_requests(sub, requests)
+            for request, output in zip(term_requests, outputs, strict=True):
+                info = output["reward_extra_info"]
+                try:
+                    if sub["is_async"]:
+                        result = await sub["fn"](**request)
+                    else:
+                        result = await self.loop.run_in_executor(None, partial(sub["fn"], **request))
+                    if isinstance(result, dict):
+                        score = float(result["score"])
+                        info.update({f"reward/{key}/{rk}": rv for rk, rv in result.items() if rk != "score"})
+                    else:
+                        score = float(result)
+                except Exception as exc:
+                    if sub["required"]:
+                        raise RuntimeError(f"Required sub-reward '{key}' failed: {exc}") from exc
+                    logger.exception("Sub-reward '%s' failed; contributing 0 to weighted sum.", key)
+                    info[f"reward/{key}/errors"] = 1
+                    score = 0.0
+                info[f"reward/{key}"] = score
+                output["reward_score"] += sub["weight"] * score
+        for output in outputs:
+            output["reward_extra_info"]["reward/combined"] = output["reward_score"]
+        return outputs
 
     async def run_single(self, data: DataProto) -> dict:
         """Prepare one sample through the subclass input contract, then aggregate."""
         if len(data) != 1:
             raise ValueError(f"{type(self).__name__} scores one sample at a time, got batch size {len(data)}.")
-        return await self._run_multi_reward(await self._build_reward_kwargs(data[0]))
+        return (await self.score_reward_requests([await self._build_reward_kwargs(data[0])]))[0]
 
 
 class MultiVisualRewardManager(MultiRewardManager):
