@@ -416,6 +416,7 @@ async def test_generate_sequences_seeds_from_global_prompt_index(monkeypatch):
     """
     worker_cls = DiffusionAgentLoopWorkerTQ.__ray_metadata__.modified_class
     worker = object.__new__(worker_cls)
+    worker.config = SimpleNamespace(reward={})
     worker.background_tasks = set()
     worker.rollout_config = SimpleNamespace(
         n=2,

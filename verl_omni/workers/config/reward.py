@@ -30,6 +30,7 @@ __all__ = [
     "RewardModelPlacementConfig",
     "RewardModelSpec",
     "accelerator_workers_enabled",
+    "deterministic_reward_batch_size",
     "get_reward_model_entries",
     "has_engine_reward_models",
     "has_native_reward_models",
@@ -317,10 +318,22 @@ def validate_reward_model_terms(config) -> None:
             )
 
 
+def deterministic_reward_batch_size(config) -> int | None:
+    """Read the opt-in fixed batch size at the reward configuration boundary."""
+    size = config.reward.get("deterministic_batch_size")
+    if size is not None and (type(size) is not int or size <= 0):
+        raise ValueError("reward.deterministic_batch_size must be a positive integer or null")
+    return size
+
+
 def reward_is_enabled(config) -> bool:
-    """Return whether either the legacy or named-model reward path is enabled."""
+    """Whether the trainer must support scoring the completed rollout batch."""
     reward_model = config.reward.get("reward_model", {})
-    return bool(reward_model.get("enable", False) or has_reward_models(config))
+    return bool(
+        reward_model.get("enable", False)
+        or has_reward_models(config)
+        or deterministic_reward_batch_size(config) is not None
+    )
 
 
 def reward_role_required(config) -> bool:
@@ -335,7 +348,7 @@ def reward_pool_is_separate(config) -> bool:
 
 def streaming_reward_enabled(config) -> bool:
     """Whether the current reward path can run inside streaming rollout workers."""
-    if not reward_is_enabled(config):
+    if not reward_role_required(config):
         return True
     if has_engine_reward_models(config) or has_native_reward_models(config):
         return False

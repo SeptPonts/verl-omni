@@ -103,6 +103,11 @@ The most important settings live under `reward`:
 The base reward config documents these fields in
 `verl_omni/trainer/config/reward/reward.yaml`.
 
+For batch-sensitive reward models, [deterministic reward batching](deterministic_reward_batching.md)
+fixes batch membership before rollout dispatch. It is opt-in: each fixed group
+is scored when its generation finishes while other groups continue running.
+Reward models requiring post-rollout wake/sleep retain that lifecycle.
+
 ## How it plugs in
 
 Async reward is enabled by passing reward-loop worker handles into the rollout
@@ -110,9 +115,7 @@ agent loop. This happens when either there is no reward model, or when the rewar
 model has its own resource pool:
 
 ```python
-enable_agent_reward_loop = (
-    not self.use_rm or self.config.reward.reward_model.enable_resource_pool
-)
+enable_agent_reward_loop = streaming_reward_enabled(self.config)
 reward_loop_worker_handles = (
     self.reward_loop_manager.reward_loop_workers
     if enable_agent_reward_loop

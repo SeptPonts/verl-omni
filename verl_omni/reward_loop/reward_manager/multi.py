@@ -81,7 +81,7 @@ class MultiRewardManager(RewardManagerBase, ABC):
 
         self._sub_rewards = []
         total_weight = 0.0
-        _reserved_keys = {"path", "name", "weight", "required", "model", "use_rollout_sampling_params"}
+        _reserved_keys = {"path", "name", "batch_name", "weight", "required", "model", "use_rollout_sampling_params"}
         for key, entry in reward_functions_cfg.items():
             model_name = resolve_reward_model_name(key, entry, reward_models_cfg)
             use_rollout_sampling_params = entry.get("use_rollout_sampling_params", False)
@@ -116,6 +116,8 @@ class MultiRewardManager(RewardManagerBase, ABC):
             extra_args = {k: v for k, v in entry.items() if k not in _reserved_keys}
 
             fn = load_extern_object(path, name) if path is not None else None
+            batch_name = entry.get("batch_name")
+            batch_fn = load_extern_object(path, batch_name) if batch_name is not None else None
             sig = inspect.signature(fn) if fn is not None else None
             is_async = inspect.iscoroutinefunction(fn) if fn is not None else True
 
@@ -123,6 +125,7 @@ class MultiRewardManager(RewardManagerBase, ABC):
                 {
                     "key": key,
                     "fn": fn,
+                    "batch_fn": batch_fn,
                     "weight": weight,
                     "required": required,
                     "sig": sig,
@@ -177,19 +180,47 @@ class MultiRewardManager(RewardManagerBase, ABC):
             extra_args.update(reward_kwargs())
         return [_filter_kwargs({**request, **extra_args}, sub["sig"]) for request in requests]
 
-    async def score_reward_requests(self, requests: list[dict]) -> list[dict]:
+    async def execute_reward_term(self, sub: dict, requests: list[dict], use_batch: bool) -> list:
+        """Invoke one explicit batch or serial scalar calls, retaining row failures."""
+        batch_fn = sub["batch_fn"] if use_batch else None
+        if batch_fn is not None:
+            try:
+                if inspect.iscoroutinefunction(batch_fn):
+                    results = await batch_fn(requests)
+                else:
+                    results = await self.loop.run_in_executor(None, batch_fn, requests)
+            except Exception as exc:
+                return [exc] * len(requests)
+            if len(results) != len(requests):
+                raise ValueError(
+                    f"Batch reward '{sub['key']}' returned {len(results)} results for {len(requests)} requests"
+                )
+            return results
+
+        results = []
+        for request in requests:
+            try:
+                if sub["is_async"]:
+                    result = await sub["fn"](**request)
+                else:
+                    result = await self.loop.run_in_executor(None, partial(sub["fn"], **request))
+            except Exception as exc:
+                result = exc
+            results.append(result)
+        return results
+
+    async def score_reward_requests(self, requests: list[dict], *, use_batch: bool = False) -> list[dict]:
         """Execute terms in configuration order and retain each sample's metrics."""
         outputs = [{"reward_score": 0.0, "reward_extra_info": {}} for _ in requests]
         for sub in self._sub_rewards:
             key = sub["key"]
             term_requests = self.prepare_reward_requests(sub, requests)
-            for request, output in zip(term_requests, outputs, strict=True):
+            results = await self.execute_reward_term(sub, term_requests, use_batch)
+            for result, output in zip(results, outputs, strict=True):
                 info = output["reward_extra_info"]
                 try:
-                    if sub["is_async"]:
-                        result = await sub["fn"](**request)
-                    else:
-                        result = await self.loop.run_in_executor(None, partial(sub["fn"], **request))
+                    if isinstance(result, Exception):
+                        raise result
                     if isinstance(result, dict):
                         score = float(result["score"])
                         info.update({f"reward/{key}/{rk}": rv for rk, rv in result.items() if rk != "score"})
@@ -212,6 +243,11 @@ class MultiRewardManager(RewardManagerBase, ABC):
         if len(data) != 1:
             raise ValueError(f"{type(self).__name__} scores one sample at a time, got batch size {len(data)}.")
         return (await self.score_reward_requests([await self._build_reward_kwargs(data[0])]))[0]
+
+    async def run_batch(self, data: DataProto) -> list[dict]:
+        """Score one scheduler-owned batch without changing membership or order."""
+        requests = [await self._build_reward_kwargs(data[index]) for index in range(len(data))]
+        return await self.score_reward_requests(requests, use_batch=True)
 
 
 class MultiVisualRewardManager(MultiRewardManager):

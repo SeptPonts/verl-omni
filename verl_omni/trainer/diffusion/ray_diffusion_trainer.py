@@ -93,7 +93,12 @@ from verl_omni.utils.tracking import (
     log_wandb_media,
     wrap_val_samples_for_wandb,
 )
-from verl_omni.workers.config.reward import reward_is_enabled, reward_role_required, streaming_reward_enabled
+from verl_omni.workers.config.reward import (
+    deterministic_reward_batch_size,
+    reward_is_enabled,
+    reward_role_required,
+    streaming_reward_enabled,
+)
 from verl_omni.workers.rollout.replica import DiffusionLLMServerManager as LLMServerManager
 from verl_omni.workers.utils.padding import embeds_padding_2_no_padding
 
@@ -775,6 +780,8 @@ class BaseRayDiffusionTrainer(ABC):
 
             # pad to be divisible by dp_size
             size_divisor = self.config.actor_rollout_ref.rollout.agent.num_workers
+            if deterministic_reward_batch_size(self.config) is not None:
+                size_divisor = 1
             test_gen_batch_padded, pad_size = pad_dataproto_to_divisor(test_gen_batch, size_divisor)
             test_output_gen_batch_padded = self.async_rollout_manager.generate_sequences(test_gen_batch_padded)
 
@@ -1065,11 +1072,7 @@ class BaseRayDiffusionTrainer(ABC):
         if manager_class_fqn:
             AgentLoopManager = load_class_from_fqn(manager_class_fqn, "AgentLoopManager")
         else:
-            from verl.experimental.agent_loop import AgentLoopManager
-
-            from verl_omni.agent_loop import DiffusionAgentLoopWorker
-
-            AgentLoopManager.agent_loop_workers_class = ray.remote(DiffusionAgentLoopWorker)
+            from verl_omni.agent_loop.diffusion_agent_loop import DiffusionAgentLoopManager as AgentLoopManager
 
         # infrastructure overview: https://verl.readthedocs.io/en/latest/advance/reward_loop.html#architecture-design
         # agent_reward_loop: streaming reward computation with actor rollout

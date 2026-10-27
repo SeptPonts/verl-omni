@@ -26,6 +26,7 @@ from verl.trainer.ppo.reward import resolve_reward_manager_cls
 
 from verl_omni.workers.config.reward import (
     accelerator_workers_enabled,
+    deterministic_reward_batch_size,
     get_reward_model_entries,
     has_reward_models,
     resolve_reward_model_name,
@@ -43,6 +44,25 @@ from .reward_model_executor import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+async def score_fixed_batches(data: DataProto, workers: list, batch_size: int) -> list[dict]:
+    """Assign complete input-ordered batches to workers and restore row order.
+
+    Partition before assigning workers: worker count must not change a scorer's
+    batch members. Each worker processes its assigned batches serially; only the
+    final batch can be short, and no duplicate rows are added for padding.
+    """
+    assignments = [[] for _ in workers]
+    for start in range(0, len(data), batch_size):
+        assignments[(start // batch_size) % len(workers)].extend(range(start, min(start + batch_size, len(data))))
+    active = [(worker, indices) for worker, indices in zip(workers, assignments, strict=True) if indices]
+    outputs = await asyncio.gather(*(worker.compute_score_batch.remote(data[indices]) for worker, indices in active))
+    ordered = [None] * len(data)
+    for (_, indices), rows in zip(active, outputs, strict=True):
+        for index, row in zip(indices, rows, strict=True):
+            ordered[index] = row
+    return ordered
 
 
 def _validate_named_reward_manager_cls(reward_manager_cls) -> None:
@@ -84,6 +104,16 @@ class OmniRewardLoopWorker(RewardLoopWorker):
                 self.engine_reward_executors,
                 self.native_reward_executors,
             )
+
+    async def compute_score_batch(self, data: DataProto) -> list[dict]:
+        """Preserve coordinator batch boundaries across sequential scorer calls."""
+        batch_size = deterministic_reward_batch_size(self.config)
+        if batch_size is None:
+            return await super().compute_score_batch(data)
+        outputs = []
+        for start in range(0, len(data), batch_size):
+            outputs.extend(await self.reward_manager.run_batch(data[start : start + batch_size]))
+        return outputs
 
     def start_h3_comparison_profile(self, directory, rl_step, record_shapes=True):
         """Capture custom CLAP/ImageBind device work during the matching generation window."""
@@ -143,8 +173,15 @@ class OmniRewardLoopManager(RewardLoopManager):
     """
 
     def __init__(self, config, rm_resource_pool=None, accelerator_resource_pool=None):
+        """Validate batching and construct workers in the existing resource pools."""
         self._score_lock = asyncio.Lock()
         self.accelerator_resource_pool = accelerator_resource_pool
+        if deterministic_reward_batch_size(config) is not None:
+            from .reward_manager.multi import MultiRewardManager
+
+            manager_cls = resolve_reward_manager_cls(config)
+            if not issubclass(manager_cls, MultiRewardManager):
+                raise ValueError("reward.deterministic_batch_size requires a MultiRewardManager subclass")
         named_reward_manager_cls = None
         if has_reward_models(config):
             validate_reward_model_terms(config)
@@ -250,6 +287,7 @@ class OmniRewardLoopManager(RewardLoopManager):
             self._register_worker_group("legacy", self.reward_loop_workers, self.config)
             return
         super()._init_reward_loop_workers()
+        self._register_worker_group("legacy", self.reward_loop_workers, self.config)
 
     def _copy_reward_config(self, reward_functions):
         group_config = copy.deepcopy(self.config)
@@ -296,7 +334,7 @@ class OmniRewardLoopManager(RewardLoopManager):
 
     def compute_rm_score(self, data):
         """Synchronous compatibility entrypoint for current trainers."""
-        if not self.multi_reward_model_manager.models:
+        if not self.multi_reward_model_manager.models and deterministic_reward_batch_size(self.config) is None:
             return super().compute_rm_score(data)
         try:
             asyncio.get_running_loop()
@@ -305,19 +343,23 @@ class OmniRewardLoopManager(RewardLoopManager):
         raise RuntimeError("compute_rm_score() cannot run inside an event loop; await async_compute_rm_score() instead")
 
     async def async_compute_rm_score(self, data):
-        """Score named reward models without blocking the caller's event loop."""
-        if not self.multi_reward_model_manager.models:
+        """Score complete batches within the existing reward model lifecycle."""
+        if not self.multi_reward_model_manager.models and deterministic_reward_batch_size(self.config) is None:
             return await asyncio.to_thread(super().compute_rm_score, data)
         async with self._score_lock:
             scoring_error = None
             try:
                 await self.multi_reward_model_manager.wake_up()
+                if self.reward_model_manager is not None:
+                    await asyncio.to_thread(self.reward_model_manager.wake_up)
                 return await self._compute_named_model_scores(data)
             except BaseException as exc:
                 scoring_error = exc
                 raise
             finally:
                 try:
+                    if self.reward_model_manager is not None:
+                        await asyncio.to_thread(self.reward_model_manager.sleep)
                     await self.multi_reward_model_manager.sleep()
                 except Exception:
                     if scoring_error is None:
@@ -325,8 +367,13 @@ class OmniRewardLoopManager(RewardLoopManager):
                     logger.exception("Failed to sleep reward models after scoring failed")
 
     async def _compute_named_model_scores(self, data: DataProto) -> DataProto:
+        """Score worker groups and combine terms in their configured order."""
+        batch_size = deterministic_reward_batch_size(self.config)
         requests_by_group = {}
         for group_name, workers in self._reward_worker_groups.items():
+            if batch_size is not None:
+                requests_by_group[group_name] = ([score_fixed_batches(data, workers, batch_size)], 0)
+                continue
             num_workers = len(workers)
             padded_data, pad_size = pad_dataproto_to_divisor(data, num_workers)
             chunks = padded_data.chunk(num_workers)

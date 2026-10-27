@@ -14,6 +14,7 @@
 
 import asyncio
 import logging
+import math
 import os
 from typing import Any
 
@@ -22,6 +23,8 @@ import torch
 import transfer_queue as tq
 from tensordict import NonTensorData, NonTensorStack, TensorDict
 from verl.experimental.agent_loop import get_trajectory_info
+from verl.trainer.ppo.v1 import AgentLoopManagerTQ
+from verl.utils import tensordict_utils as tu
 from verl.utils.ray_utils import auto_await
 from verl.utils.tensordict_utils import list_of_dict_to_tensordict
 
@@ -31,6 +34,7 @@ from verl_omni.agent_loop.diffusion_agent_loop import (
     _InternalDiffusionAgentLoopOutput,
 )
 from verl_omni.agent_loop.utils import _derive_rollout_seed
+from verl_omni.workers.config.reward import deterministic_reward_batch_size
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
@@ -91,6 +95,25 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
         index = batch["index"] if "index" in batch else list(range(len(batch)))
         trajectory_info = await get_trajectory_info(global_steps, index, bool(validate))
 
+        batch_size = deterministic_reward_batch_size(self.config)
+        if batch_size is not None and self.reward_loop_worker_handles is not None:
+            batch_index = int(tu.get(batch, "reward_batch_index"))
+            batch.pop("reward_batch_index")
+            task = asyncio.create_task(
+                self.run_reward_prompt_group(
+                    [self._extract_prompt(batch, i) for i in range(len(batch))],
+                    sampling_params,
+                    trajectory_info,
+                    index,
+                    rollout_base_seed,
+                    batch_size,
+                    batch_index,
+                )
+            )
+            self.background_tasks.add(task)
+            task.add_done_callback(self.background_tasks.discard)
+            return
+
         for i in range(len(batch)):
             prompt = self._extract_prompt(batch, i)
             task = asyncio.create_task(
@@ -104,6 +127,61 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
             )
             self.background_tasks.add(task)
             task.add_done_callback(self.background_tasks.discard)
+
+    async def run_reward_prompt_group(
+        self,
+        prompts: list[dict],
+        sampling_params: dict,
+        trajectories: list[dict],
+        prompt_indices,
+        rollout_base_seed: int | None,
+        batch_size: int,
+        batch_index: int,
+    ) -> None:
+        """Score complete microbatches, then publish each prompt's sessions to TQ.
+
+        The manager aligns dispatch boundaries to both prompt and reward groups,
+        so no worker waits for samples owned by another worker.
+        """
+        validate = trajectories[0]["validate"]
+        partition_id = "val" if validate else "train"
+        n = self.rollout_config.val_kwargs.n if validate else self.rollout_config.n
+        for prompt in prompts:
+            await tq.async_kv_put(key=prompt["uid"], partition_id=partition_id, tag={"status": "running"})
+        status = "failure"
+        try:
+            requests = []
+            for prompt, trajectory, prompt_index in zip(prompts, trajectories, prompt_indices, strict=True):
+                for session_id in range(n):
+                    params = dict(sampling_params)
+                    if rollout_base_seed is not None and not validate:
+                        params["seed"] = _derive_rollout_seed(rollout_base_seed, int(prompt_index) * n + session_id)
+                    requests.append((params, {**prompt, "session_id": session_id, "trajectory": trajectory}))
+            async with asyncio.TaskGroup() as group:
+                tasks = [
+                    group.create_task(
+                        self.generate_and_score_batch(requests[start : start + batch_size], batch_index + i, validate)
+                    )
+                    for i, start in enumerate(range(0, len(requests), batch_size))
+                ]
+            outputs = [output for task in tasks for output in task.result()]
+            for i, (prompt, trajectory) in enumerate(zip(prompts, trajectories, strict=True)):
+                await self._write_trajectories_to_tq(
+                    list(enumerate(outputs[i * n : (i + 1) * n])),
+                    uid=prompt["uid"],
+                    trajectory=trajectory,
+                    validate=validate,
+                    global_steps=sampling_params.get("global_steps"),
+                    **{key: value for key, value in prompt.items() if key not in {"uid", "global_steps"}},
+                )
+            status = "finished"
+        except Exception:
+            logger.exception("Fixed reward group failed for prompts %s", [prompt["uid"] for prompt in prompts])
+        finally:
+            # TaskGroup has settled all generation/scoring siblings before a
+            # failed prompt becomes eligible for the replay buffer's retry path.
+            for prompt in prompts:
+                await tq.async_kv_put(key=prompt["uid"], partition_id=partition_id, tag={"status": status})
 
     @staticmethod
     def _extract_prompt(batch: TensorDict, i: int) -> dict:
@@ -194,13 +272,16 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
         agent_name: str,
         session_id: int = 0,
         trajectory: dict | None = None,
+        validate: bool = False,
+        score_reward: bool = True,
         **kwargs,
     ) -> _InternalDiffusionAgentLoopOutput:
         """Run one diffusion agent loop session; the TQ write is batched per prompt."""
         return await super()._run_agent_loop(
             sampling_params,
             agent_name=agent_name,
-            validate=trajectory["validate"] if trajectory else False,
+            validate=trajectory["validate"] if trajectory else validate,
+            score_reward=score_reward,
             **kwargs,
         )
 
@@ -300,12 +381,32 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
             )
 
 
+class DiffusionAgentLoopManagerTQ(AgentLoopManagerTQ):
+    """Keep expanded reward microbatches intact when dispatching prompt groups."""
+
+    def generate_sequences(self, prompts: TensorDict) -> None:
+        """Align prompt dispatch to reward boundaries without splitting a prompt."""
+        batch_size = deterministic_reward_batch_size(self.config)
+        if batch_size is None or self.reward_loop_worker_handles is None:
+            return super().generate_sequences(prompts)
+        validate = tu.get(prompts, "validate", False)
+        n = self.rollout_config.val_kwargs.n if validate else self.rollout_config.n
+        # LCM(n, batch_size) expanded rows end on both boundaries. This supports
+        # any batch size without coupling inference groups to advantage groups.
+        prompt_count = batch_size // math.gcd(batch_size, n)
+        requests = []
+        for group_index, start in enumerate(range(0, len(prompts), prompt_count)):
+            chunk = prompts[start : start + prompt_count].clone(recurse=False)
+            chunk["reward_batch_index"] = NonTensorData(start * n // batch_size)
+            worker = self.agent_loop_workers[group_index % len(self.agent_loop_workers)]
+            requests.append(worker.generate_sequences.remote(chunk))
+        ray.get(requests)
+
+
 @auto_await
 async def create_diffusion_agent_loop_manager(*args, **kwargs):
-    """Build verl's ``AgentLoopManagerTQ`` wired with ``DiffusionAgentLoopWorkerTQ``."""
-    from verl.trainer.ppo.v1 import AgentLoopManagerTQ
-
-    manager = AgentLoopManagerTQ(*args, **kwargs)
+    """Build the TQ manager and initialize its diffusion workers."""
+    manager = DiffusionAgentLoopManagerTQ(*args, **kwargs)
     manager.agent_loop_workers_class = DiffusionAgentLoopWorkerTQ
     await manager._init_agent_loop_workers()
     return manager

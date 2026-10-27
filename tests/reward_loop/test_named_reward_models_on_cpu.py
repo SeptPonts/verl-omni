@@ -596,6 +596,8 @@ def test_native_models_create_isolated_worker_groups(monkeypatch):
         "hpsv3": RewardModelSpec(name="hpsv3", backend="native", model_path="/models/hpsv3"),
     }
     manager = object.__new__(OmniRewardLoopManager)
+    manager.config = _config()
+    manager.reward_model_manager = None
     manager.config = config
     manager.reward_router_address = None
     manager.multi_reward_model_manager = SimpleNamespace(
@@ -1010,6 +1012,8 @@ def test_model_manager_rejects_existing_and_named_models():
 
 def test_native_model_requires_allocated_native_resource_pool():
     manager = object.__new__(OmniRewardLoopManager)
+    manager.config = _config()
+    manager.reward_model_manager = None
     manager.multi_reward_model_manager = SimpleNamespace(
         native_resource_pools={},
     )
@@ -1045,6 +1049,8 @@ async def test_named_model_groups_merge_scores_and_extra_info():
         non_tensors={"data_source": ["a", "b"]},
     )
     manager = object.__new__(OmniRewardLoopManager)
+    manager.config = _config()
+    manager.reward_model_manager = None
     manager.reward_manager_cls = _RewardManager
     manager._reward_worker_groups = {
         "shared": [
@@ -1107,6 +1113,8 @@ async def test_named_model_groups_score_concurrently():
         non_tensors={"data_source": ["a"]},
     )
     manager = object.__new__(OmniRewardLoopManager)
+    manager.config = _config()
+    manager.reward_model_manager = None
     manager.reward_manager_cls = _RewardManager
     manager._reward_worker_groups = {
         "engine": [_Worker("engine", 0.25)],
@@ -1123,6 +1131,8 @@ async def test_named_model_groups_score_concurrently():
 async def test_async_compute_rm_score_brackets_scoring_with_one_lifecycle():
     calls = []
     manager = object.__new__(OmniRewardLoopManager)
+    manager.config = _config()
+    manager.reward_model_manager = None
     manager._score_lock = asyncio.Lock()
 
     async def wake_up():
@@ -1154,6 +1164,8 @@ async def test_async_compute_rm_score_serializes_lifecycle_brackets():
     first_score_entered = asyncio.Event()
     release_first_score = asyncio.Event()
     manager = object.__new__(OmniRewardLoopManager)
+    manager.config = _config()
+    manager.reward_model_manager = None
     manager._score_lock = asyncio.Lock()
 
     async def wake_up():

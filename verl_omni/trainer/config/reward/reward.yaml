@@ -13,6 +13,10 @@ defaults:
 # we launch num_workers reward managers to parallelize the reward computation
 num_workers: 8
 
+# Fix reward batch membership before dispatching diffusion rollouts.
+# null preserves existing scheduling; streaming groups retain generation overlap.
+deterministic_batch_size: null
+
 # custom reward function definition
 custom_reward_function:
   # The path to the file containing your customized reward function.
@@ -31,7 +35,8 @@ accelerator_workers:
 
 # Multi-reward configuration (dict-based, mutually exclusive with custom_reward_function).
 # Keys are user-chosen names used for metric logging (e.g., "ocr", "jpeg").
-# Each entry: path (str), name (str), weight (float).
+# Each entry: path (str), name (str), weight (float), optional batch_name (str).
+# batch_name receives a list of scalar-call kwargs and returns one result per row.
 reward_functions: {}
 
 # Named reward models. See docs/algo/named_reward_models.md for configuration

@@ -24,16 +24,24 @@ from omegaconf import DictConfig, OmegaConf
 from pydantic import BaseModel, ConfigDict
 from tensordict import TensorDict
 from verl.base_config import BaseConfig
-from verl.experimental.agent_loop.agent_loop import AgentLoopMetrics, DictConfigWrap, _agent_loop_registry
+from verl.experimental.agent_loop.agent_loop import (
+    AgentLoopManager,
+    AgentLoopMetrics,
+    DictConfigWrap,
+    _agent_loop_registry,
+)
 from verl.experimental.agent_loop.utils import resolve_config_path
 from verl.protocol import DataProto
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.dataset.rl_dataset import get_dataset_class
 from verl.utils.profiler import simple_timer
+from verl.utils.ray_utils import auto_await
+from verl.utils.skip import SkipManager
 from verl.workers.rollout.llm_server import LLMServerClient
 
 from verl_omni.agent_loop.utils import maybe_per_rollout_seeds
 from verl_omni.workers.config import DiffusionModelConfig, DiffusionRolloutConfig
+from verl_omni.workers.config.reward import deterministic_reward_batch_size
 
 
 def _config_to_sampling_dict(config: Optional[BaseConfig]) -> dict:
@@ -240,20 +248,77 @@ class DiffusionAgentLoopWorker:
             default_agent_loop = config.agent.default_agent_loop
             batch.non_tensor_batch["agent_name"] = np.array([default_agent_loop] * len(batch), dtype=object)
 
-        tasks = []
+        requests = []
         for i in range(len(batch)):
             kwargs = {k: v[i] for k, v in batch.non_tensor_batch.items()}
             task_sampling_params = sampling_params.copy()
             if per_rollout_seeds is not None:
                 task_sampling_params["seed"] = per_rollout_seeds[i]
-            tasks.append(
-                asyncio.create_task(self._run_agent_loop(task_sampling_params, validate=is_validate, **kwargs))
+            requests.append((task_sampling_params, kwargs))
+        batch_size = deterministic_reward_batch_size(self.config)
+        if batch_size is not None and self.reward_loop_worker_handles is not None:
+            outputs = await self.generate_and_score_batch(requests, batch.meta_info["reward_batch_index"], is_validate)
+        else:
+            outputs = await asyncio.gather(
+                *(self._run_agent_loop(params, validate=is_validate, **kwargs) for params, kwargs in requests)
             )
-        outputs = await asyncio.gather(*tasks)
 
         output = self._postprocess(outputs, input_non_tensor_batch=batch.non_tensor_batch)
 
         return output
+
+    async def generate_and_score_batch(
+        self, requests: list[tuple[dict, dict]], batch_index: int, validate: bool
+    ) -> list[_InternalDiffusionAgentLoopOutput]:
+        """Own one fixed generation group through scoring, cancelling failed siblings.
+
+        The manager chooses membership before worker dispatch. Generation stays
+        concurrent within the group; only this group's completion gates its reward.
+        """
+        async with asyncio.TaskGroup() as group:
+            tasks = [
+                group.create_task(self._run_agent_loop(params, validate=validate, score_reward=False, **kwargs))
+                for params, kwargs in requests
+            ]
+        outputs = [task.result() for task in tasks]
+        pending = [i for i, output in enumerate(outputs) if output.reward_score is None]
+        if not pending:
+            return outputs
+
+        # Internal outputs have a leading singleton batch dimension. Restore the
+        # per-sample tool fields expected by the existing scalar reward contract.
+        tool_fields = [
+            {
+                key: value[0] if isinstance(value, torch.Tensor) else value
+                for key, value in outputs[i].extra_fields.items()
+            }
+            for i in pending
+        ]
+        non_tensor_batch = {
+            key: np.array([requests[i][1][key] for i in pending], dtype=object) for key in requests[0][1]
+        }
+        non_tensor_batch["__num_turns__"] = np.array([outputs[i].num_turns for i in pending])
+        non_tensor_batch["tool_extra_fields"] = np.array(tool_fields, dtype=object)
+        data = DataProto(
+            batch=TensorDict(
+                {
+                    "prompts": torch.cat([outputs[i].prompt_ids for i in pending]),
+                    "responses": torch.cat([outputs[i].response_diffusion_output for i in pending]),
+                },
+                batch_size=len(pending),
+            ),
+            non_tensor_batch=non_tensor_batch,
+            meta_info={"validate": validate},
+        )
+        worker = self.reward_loop_worker_handles[batch_index % len(self.reward_loop_worker_handles)]
+        timing = {}
+        with simple_timer("compute_score", timing):
+            results = await worker.compute_score_batch.remote(data)
+        for index, result in zip(pending, results, strict=True):
+            outputs[index].reward_score = result["reward_score"]
+            outputs[index].extra_fields["reward_extra_info"] = result["reward_extra_info"]
+            outputs[index].metrics.compute_score = timing["compute_score"]
+        return outputs
 
     async def _run_agent_loop(
         self,
@@ -261,8 +326,10 @@ class DiffusionAgentLoopWorker:
         *,
         agent_name: str,
         validate: bool = False,
+        score_reward: bool = True,
         **kwargs,
     ) -> _InternalDiffusionAgentLoopOutput:
+        """Generate one sample and optionally score it before returning."""
         assert agent_name in _agent_loop_registry, (
             f"Agent loop {agent_name} not registered, registered agent loops: {_agent_loop_registry.keys()}"
         )
@@ -280,10 +347,12 @@ class DiffusionAgentLoopWorker:
             extra_tokenizer_map=self.model_config.extra_tokenizer_map,
         )
         output: DiffusionAgentLoopOutput = await agent_loop.run(sampling_params, **kwargs)
+        if not score_reward:
+            kwargs["score_reward"] = False
         return await self._agent_loop_postprocess(output, validate=validate, **kwargs)
 
     async def _agent_loop_postprocess(
-        self, output, validate: bool = False, **kwargs
+        self, output, validate: bool = False, score_reward: bool = True, **kwargs
     ) -> _InternalDiffusionAgentLoopOutput:
         """Perform post-processing operations on the output of each individual agent loop."""
         # Pad extra tensor outputs from vllm-omni (e.g. prompt embeddings).
@@ -317,13 +386,14 @@ class DiffusionAgentLoopWorker:
         prompt_ids = prompt_output["input_ids"]
         extra_fields["attention_mask"] = prompt_output["attention_mask"]
 
-        await self._compute_score(
-            output,
-            prompts=prompt_ids,
-            responses=response_diffusion_output,
-            kwargs=kwargs,
-            validate=validate,
-        )
+        if score_reward:
+            await self._compute_score(
+                output,
+                prompts=prompt_ids,
+                responses=response_diffusion_output,
+                kwargs=kwargs,
+                validate=validate,
+            )
 
         if "reward_extra_info" in output.extra_fields:
             extra_fields["reward_extra_info"] = output.extra_fields["reward_extra_info"]
@@ -454,3 +524,55 @@ class DiffusionAgentLoopWorker:
             non_tensor_batch=non_tensor_batch,
             meta_info=meta_info,
         )
+
+
+class DiffusionAgentLoopManager(AgentLoopManager):
+    """Dispatch complete reward microbatches while retaining the verl lifecycle."""
+
+    agent_loop_workers_class = ray.remote(DiffusionAgentLoopWorker)
+
+    @auto_await
+    async def generate_sequences(self, prompts: DataProto) -> DataProto:
+        """Choose existing dispatch or fixed groups without nesting skip hooks."""
+        batch_size = deterministic_reward_batch_size(self.config)
+        if batch_size is None:
+            return await super().generate_sequences(prompts)
+        return await self.generate_reward_groups(prompts, batch_size)
+
+    @SkipManager.annotate(role="rollout")
+    async def generate_reward_groups(self, prompts: DataProto, batch_size: int) -> DataProto:
+        """Partition before worker routing and collect groups in input order."""
+        if "priority" not in prompts.non_tensor_batch:
+            prompts.non_tensor_batch["priority"] = np.arange(len(prompts), dtype=np.int64)
+        if "_rollout_seed_global_idx" not in prompts.non_tensor_batch:
+            prompts.non_tensor_batch["_rollout_seed_global_idx"] = np.arange(len(prompts), dtype=np.int64)
+        requests = []
+        for batch_index, start in enumerate(range(0, len(prompts), batch_size)):
+            chunk = prompts[start : start + batch_size]
+            chunk.meta_info = {**prompts.meta_info, "reward_batch_index": batch_index}
+            worker = self.agent_loop_workers[batch_index % len(self.agent_loop_workers)]
+            requests.append(worker.generate_sequences.remote(chunk))
+        try:
+            outputs = await asyncio.gather(*requests)
+        except BaseException:
+            for request in requests:
+                ray.cancel(request)
+            await asyncio.gather(*requests, return_exceptions=True)
+            raise
+        # Match one whole-batch postprocess: only reward metrics present on all
+        # rows become columns; heterogeneous tool fields remain object columns.
+        if "rm_scores" in outputs[0].batch:
+            reward_keys = sorted(set.intersection(*(set(item.meta_info["reward_extra_keys"]) for item in outputs)))
+            for item in outputs:
+                for key in set(item.meta_info["reward_extra_keys"]) - set(reward_keys):
+                    item.non_tensor_batch.pop(key)
+                item.meta_info["reward_extra_keys"] = reward_keys
+        extra_keys = set().union(*(item.non_tensor_batch for item in outputs))
+        for item in outputs:
+            for key in extra_keys - item.non_tensor_batch.keys():
+                item.non_tensor_batch[key] = np.full(len(item), None, dtype=object)
+        output = DataProto.concat(outputs)
+        metrics = [item.meta_info.pop("metrics") for item in outputs]
+        timing = self._performance_metrics(metrics, output)
+        output.meta_info = {"timing": timing, **outputs[0].meta_info}
+        return output
