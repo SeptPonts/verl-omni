@@ -5,6 +5,7 @@ set -euo pipefail
 set -x
 
 export WANDB_MODE=${WANDB_MODE:-online}
+export VERL_PLATFORM=${VERL_PLATFORM:-cambricon}
 
 WORKSPACE=${WORKSPACE:-$HOME}
 MODEL_PATH=${MODEL_PATH:-$WORKSPACE/models/MiniMax-H3/FL2VA}

@@ -329,7 +329,6 @@ existing FlowGRPO reward and SDE-window defaults are unchanged.
 MODEL_PATH="$MODEL_ROOT/FL2VA" \
 DATA_DIR="$HOME/data/vid_prompt/verl_omni" \
 IMAGEBIND_MODEL_PATH=/path/to/imagebind_huge.pth \
-VERL_PLATFORM=cambricon \
 bash examples/flowgrpo_trainer/minimax_h3/run_minimax_h3_t2va_lora_v1_mlu.sh
 ```
 

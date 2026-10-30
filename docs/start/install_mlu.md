@@ -58,14 +58,12 @@ git clone https://github.com/verl-project/verl-omni.git
 cd verl-omni
 ```
 
-1. Check out the verl revision pinned by VeRL-Omni:
+1. Check out the verl revision pinned by VeRL-Omni and the hardware-plugin revision:
 
 ```bash
 git -C ../verl checkout "$(tr -d '[:space:]' < .github/verl_pin.txt)"
+git -C ../verl-hardware-plugin checkout 549091f934278582c354e3f31033ecf7edc68b47
 ```
-
-Use a hardware-plugin revision compatible with this verl revision and the
-container.
 
 2. Install the project dependencies while preserving the container's
 preinstalled MLU packages:
