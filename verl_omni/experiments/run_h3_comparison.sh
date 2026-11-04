@@ -15,7 +15,7 @@ case "$H3_PLATFORM" in
     cuda)
         launcher="$repo_root/examples/flowgrpo_trainer/minimax_h3/run_minimax_h3_t2va_lora.sh"
         export H3_FA4_HUB_REVISION=86c34f1cec40ea37e019fe79b054d9a1e189ffb2 REWARD_DEVICE=cuda
-        platform_args=(actor_rollout_ref.model.attn_backend=flash_4_hub actor_rollout_ref.rollout.rollout_attn_backend=FLASH_ATTN)
+        platform_args=(actor_rollout_ref.model.attn_backend=flash_4_hub actor_rollout_ref.rollout.rollout_attn_backend=FLASH_ATTN +actor_rollout_ref.rollout.engine_kwargs.vllm_omni.trust_remote_code=True)
         ;;
     mlu)
         : "${H3_CNCL_TUNER_DIR:?Set H3_CNCL_TUNER_DIR to the tuner directory}"
