@@ -144,6 +144,8 @@ def adapter_loaded(module: torch.nn.Module, model_config: Any) -> dict:
             layers[name.removeprefix("base_model.model.")] = layout
     if layers.keys() != {name.rsplit(".lora_", 1)[0] for name in expected}:
         raise ValueError("H3 loaded adapter layer coverage differs from its 312 source modules")
+    # PEFT condenses targets during load; sync uses the verified full module paths.
+    module.peft_config["default"].target_modules = set(layers)
     deferred = sum(record["status"] == "DEFERRED_META" for record in records.values())
     report = {
         "status": "DEFERRED_META" if deferred else "VERIFIED",
