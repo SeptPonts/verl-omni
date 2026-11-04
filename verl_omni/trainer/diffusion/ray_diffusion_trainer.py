@@ -52,7 +52,7 @@ from verl.utils.import_utils import load_class_from_fqn
 from verl.utils.metric import reduce_metrics
 from verl.utils.py_functional import rename_dict
 from verl.utils.skip import SkipManager
-from verl.utils.tracking import ValidationGenerationsLogger
+from verl.utils.tracking import Tracking, ValidationGenerationsLogger
 
 from verl_omni.pipelines.experiment_hooks import invoke_experiment
 from verl_omni.pipelines.rollout_media import (
@@ -491,6 +491,14 @@ class BaseRayDiffusionTrainer(ABC):
 
         # initialize SkipManager (verl rollout skip + verl-omni stage skip; no-op until configured).
         init_skip_manager(self.config)
+
+        # Fail tracking initialization before init_workers allocates accelerator resources.
+        self.logger = Tracking(
+            project_name=self.config.trainer.project_name,
+            experiment_name=self.config.trainer.experiment_name,
+            default_backend=self.config.trainer.logger,
+            config=OmegaConf.to_container(self.config, resolve=True),
+        )
 
     def _create_dataloader(self, train_dataset, val_dataset, collate_fn, train_sampler: Optional[Sampler]):
         """
@@ -1377,15 +1385,7 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
         to construct the PPO dataflow.
         The light-weight advantage computation is done on the driver process.
         """
-        from omegaconf import OmegaConf
-        from verl.utils.tracking import Tracking
-
-        logger = Tracking(
-            project_name=self.config.trainer.project_name,
-            experiment_name=self.config.trainer.experiment_name,
-            default_backend=self.config.trainer.logger,
-            config=OmegaConf.to_container(self.config, resolve=True),
-        )
+        logger = self.logger
 
         self.global_steps = 0
 
@@ -1833,15 +1833,7 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
         Offline algorithms read pre-computed rewards from the dataset.
         Online algorithms generate rollouts and compute rewards live.
         """
-        from omegaconf import OmegaConf
-        from verl.utils.tracking import Tracking
-
-        logger = Tracking(
-            project_name=self.config.trainer.project_name,
-            experiment_name=self.config.trainer.experiment_name,
-            default_backend=self.config.trainer.logger,
-            config=OmegaConf.to_container(self.config, resolve=True),
-        )
+        logger = self.logger
 
         self.global_steps = 0
 
