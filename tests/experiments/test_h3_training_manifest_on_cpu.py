@@ -80,7 +80,7 @@ def case(api, tmp_path):
                 "dataloader_num_workers": 0,
             },
             "actor_rollout_ref": {"rollout": {"seed": 42, "n": 8}},
-            "trainer": {"v1": {"trainer_mode": "sync", "sampler": {"drop_incomplete_groups": False}}},
+            "trainer": {"use_v1": False},
         }
     )
     dataset = SourceDataset(rows)
@@ -99,6 +99,13 @@ def batch_fields(case, step):
     }
     fields.update(index=list(range(32)), uid=["transport-only"] * 32)
     return fields
+
+
+def test_v0_uses_the_same_frozen_source_indices_without_v1_settings(api, case):
+    """A V0 input ledger authenticates source rows without acquiring V1 queue semantics."""
+    case.config.trainer.use_v1 = False
+    assert "v1" not in case.config.trainer
+    assert api.validate_h3_training_dataset(case.config, case.dataset, case.path) == case.manifest
 
 
 def test_raw_batch_uses_manifest_positions_and_preserves_rng(api, case, tmp_path):
@@ -170,8 +177,8 @@ def test_manifest_corruption_or_unused_row_change_is_rejected(api, case, field):
         ("data.gen_batch_size", 1),
         ("actor_rollout_ref.rollout.seed", 43),
         ("actor_rollout_ref.rollout.n", 4),
-        ("trainer.v1.trainer_mode", "separate_async"),
-        ("trainer.v1.sampler.drop_incomplete_groups", True),
+        ("trainer.use_v1", True),
+        ("actor_rollout_ref.separate", True),
         ("data.custom_cls", {"path": "not_imported.py"}),
         ("data.sampler", {"class_path": "not_imported.py", "class_name": "Custom"}),
     ],

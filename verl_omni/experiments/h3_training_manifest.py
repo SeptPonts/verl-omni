@@ -55,9 +55,8 @@ def h3_training_schedule(
     """Freeze real DataLoader order offline, or check supplied frozen indices without touching RNG online."""
     data = config.data
     rollout = config.actor_rollout_ref.rollout
-    v1 = config.trainer.v1
-    if v1.trainer_mode != "sync" or v1.sampler.drop_incomplete_groups:
-        raise ValueError("H3 frozen input schedule requires V1 sync without incomplete-group refill")
+    if config.trainer.use_v1 or config.actor_rollout_ref.get("separate", False):
+        raise ValueError("H3 frozen input schedule requires colocated V0 Actor/rollout")
     sampler_config = data.get("sampler")
     if sampler_config and sampler_config.get("class_path") is not None and sampler_config.get("class_name") is not None:
         raise ValueError("H3 training manifest requires the default verl sampler with its independent generator")
@@ -180,7 +179,7 @@ def validate_h3_training_dataset(config: Any, train_dataset: Any, manifest_path:
     """
     manifest = json.loads(Path(manifest_path).read_text())
     if manifest["format"] != "h3-training-manifest-v2" or len(manifest["steps"]) != manifest["num_steps"]:
-        raise ValueError("H3 training manifest format or step count differs from V1 input contract")
+        raise ValueError("H3 training manifest format or step count differs from the frozen input contract")
     source_indices = [prompt["source_row_index"] for step in manifest["steps"] for prompt in step["prompts"]]
     actual = h3_training_schedule(config, train_dataset, source_indices, num_steps=manifest["num_steps"])
     if any(manifest[field] != value for field, value in actual.items()):

@@ -154,8 +154,10 @@ def test_worker_projection_preserves_driver_batch_and_shared_tensor_storage(incl
     ],
 )
 def test_v0_diffusion_worker_hops_exclude_responses(trainer_cls, method_name, worker_attr, remote_method):
+    """Project driver payloads with the live trainer's update identity available."""
     trainer = trainer_cls.__new__(trainer_cls)
     trainer.config = _make_config()
+    trainer.global_steps = 1
     trainer.ref_in_actor = False
     trainer.actor_rollout_wg, trainer.ref_policy_wg = _make_worker_groups()
     driver_batch = _make_batch()

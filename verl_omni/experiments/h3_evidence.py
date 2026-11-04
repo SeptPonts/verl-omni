@@ -146,7 +146,12 @@ def prepare_data(config, train_dataset, val_dataset):
     directory = Path(os.environ["H3_RUN_DIR"]) / "manifests"
     training, evaluation = directory / "training.json", directory / "evaluation.json"
     if config.trainer.resume_mode == "disable":
-        write_json(training, create_h3_training_manifest(config, train_dataset, config.data.train_files))
+        write_json(
+            training,
+            create_h3_training_manifest(
+                config, train_dataset, config.data.train_files, num_steps=config.trainer.total_training_steps
+            ),
+        )
         write_json(evaluation, create_h3_evaluation_manifest(config.data.val_files))
     elif config.trainer.resume_mode != "resume_path":
         raise H3EvidenceContractError("H3 evidence requires explicit fresh or resume_path mode")

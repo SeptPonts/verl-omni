@@ -26,6 +26,7 @@ from verl.trainer.distillation import is_distillation_enabled
 from verl.trainer.ppo.utils import need_reference_policy
 from verl.utils.device import auto_set_device, is_cuda_available
 
+from verl_omni.pipelines.experiment_hooks import invoke_experiment
 from verl_omni.trainer.diffusion.ray_diffusion_trainer import (
     DirectPreferenceRayTrainer,
     PolicyGradientRayTrainer,
@@ -143,6 +144,7 @@ def run_diffusion(config, task_runner_class=None) -> None:
     # Before ray.init() so actors inherit these via runtime_env.
     if _determinism_requested(config):
         _export_full_determinism_env(config)
+    experiment_env = invoke_experiment("runtime_env", config)
 
     # Check if Ray is not initialized
     if not ray.is_initialized():
@@ -155,6 +157,8 @@ def run_diffusion(config, task_runner_class=None) -> None:
         runtime_env_kwargs = ray_init_kwargs.get("runtime_env", {})
 
         runtime_env = OmegaConf.merge(default_runtime_env, runtime_env_kwargs)
+        if experiment_env is not None:
+            runtime_env = OmegaConf.merge(runtime_env, experiment_env)
         ray_init_kwargs = OmegaConf.create({**ray_init_kwargs, "runtime_env": runtime_env})
         print(f"ray init kwargs: {ray_init_kwargs}")
         ray.init(**OmegaConf.to_container(ray_init_kwargs))

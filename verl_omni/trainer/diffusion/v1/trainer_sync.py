@@ -56,9 +56,6 @@ class PolicyGradientDiffusionTrainerV1Sync(PolicyGradientDiffusionTrainerV1):
     def on_init_end(self):
         # update weights after loading checkpoint
         self.checkpoint_manager.update_weights(self.global_steps)
-        from verl_omni.pipelines.experiment_hooks import invoke_experiment
-
-        invoke_experiment("snapshot_initial", self.config, self.global_steps)
 
     def on_step_end(self):
         with marked_timer("update_weights", self.timing_raw, color="red"):

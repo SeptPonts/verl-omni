@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Strict H3 V1 experiment policy, applied after each process binds its devices.
+"""Strict H3 experiment policy, applied after each process binds its devices.
 
 Adapted from feature/h3-mlu-support-legacy. This provider owns experiment state;
 the trainer and workers only expose model-independent lifecycle callbacks.
@@ -34,6 +34,10 @@ from verl_omni.experiments.h3_evidence import (  # noqa: F401 -- provider lifecy
     record_training_candidates,
     snapshot_checkpoint,
     snapshot_initial,
+)
+from verl_omni.experiments.h3_v0_sampling import (  # noqa: F401 -- provider lifecycle exports
+    prepare_v0_validation_batch,
+    record_v0_sampling_request,
 )
 from verl_omni.experiments.prepare_h3_adapter import (  # noqa: F401 -- provider lifecycle exports
     adapter_loaded,
@@ -80,7 +84,7 @@ ENVIRONMENT_NAMES = (
 
 
 def runtime_env(config):
-    """Validate the declared V1 experiment before Ray and propagate only its allowlist."""
+    """Validate the selected synchronous trainer before Ray and propagate its allowlist."""
     import ray
     from omegaconf import OmegaConf
 
@@ -88,8 +92,12 @@ def runtime_env(config):
         raise ValueError("Select the experiment before ray.init(); an existing job cannot acquire its startup policy")
     if os.environ["H3_DETERMINISTIC"] != "1" or config.trainer.device != os.environ["H3_DETERMINISTIC_DEVICE"]:
         raise ValueError("H3 strict policy and trainer.device must agree")
-    if not config.trainer.use_v1 or config.trainer.v1.trainer_mode != "sync":
-        raise ValueError("This H3 recipe supports V1 sync")
+    if config.algorithm.trainer_type != "policy_gradient":
+        raise ValueError("The H3 longrun comparison requires policy-gradient training")
+    if config.trainer.use_v1:
+        raise ValueError("Use the V0 launcher for the historical H3 longrun comparison")
+    if config.actor_rollout_ref.get("separate", False):
+        raise ValueError("The H3 V0 comparison requires the historical colocated Actor/rollout topology")
     if (
         not config.actor_rollout_ref.actor.fsdp_config.full_determinism
         or not config.actor_rollout_ref.rollout.full_determinism
@@ -102,10 +110,10 @@ def runtime_env(config):
     if config.actor_rollout_ref.actor.fsdp_config.seed != 42 or config.actor_rollout_ref.rollout.seed != 42:
         raise ValueError("Actor, rollout, reward and worker seeds must all be 42")
     validate_runtime_callback()
-    if config.trainer.total_training_steps != 50 or config.data.seed != 30:
-        raise ValueError("The longrun contract is 50 RL steps with data.seed=30")
-    if config.trainer.v1.sync.parameter_sync_step != 1 or config.actor_rollout_ref.actor.ppo_epochs != 1:
-        raise ValueError("The longrun input/update identities require one sync trigger and one PPO epoch")
+    if config.trainer.total_training_steps not in (2, 50) or config.data.seed != 30:
+        raise ValueError("Use an independent 2-step acceptance or a fresh 50-step longrun, with data.seed=30")
+    if config.actor_rollout_ref.actor.ppo_epochs != 1:
+        raise ValueError("The longrun update identities require one PPO epoch")
     if config.data.val_batch_size not in (None, 128) or config.data.val_max_samples != 128:
         raise ValueError("The comparison records one complete 128-sample validation batch")
     if not config.actor_rollout_ref.model.lora_adapter_path:

@@ -33,6 +33,7 @@ from verl.utils.profiler import simple_timer
 from verl.workers.rollout.llm_server import LLMServerClient
 
 from verl_omni.agent_loop.utils import maybe_per_rollout_seeds
+from verl_omni.pipelines.experiment_hooks import invoke_experiment
 from verl_omni.workers.config import DiffusionModelConfig, DiffusionRolloutConfig
 
 
@@ -237,15 +238,20 @@ class DiffusionAgentLoopWorker:
             batch.non_tensor_batch["agent_name"] = np.array([default_agent_loop] * len(batch), dtype=object)
 
         tasks = []
+        request_contexts = []
         for i in range(len(batch)):
             kwargs = {k: v[i] for k, v in batch.non_tensor_batch.items()}
             task_sampling_params = sampling_params.copy()
             if per_rollout_seeds is not None:
                 task_sampling_params["seed"] = per_rollout_seeds[i]
+            request_contexts.append((task_sampling_params, kwargs))
             tasks.append(
                 asyncio.create_task(self._run_agent_loop(task_sampling_params, validate=is_validate, **kwargs))
             )
         outputs = await asyncio.gather(*tasks)
+
+        for result, (task_sampling_params, kwargs) in zip(outputs, request_contexts, strict=True):
+            invoke_experiment("record_v0_sampling_request", result, task_sampling_params, kwargs, is_validate, config.n)
 
         output = self._postprocess(outputs, input_non_tensor_batch=batch.non_tensor_batch)
 

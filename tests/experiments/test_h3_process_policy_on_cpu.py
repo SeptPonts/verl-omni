@@ -127,13 +127,13 @@ def runtime_case(api, monkeypatch, tmp_path):
     monkeypatch.setattr(api.policy, "validate_runtime_callback", Mock())
     config = OmegaConf.create(
         {
+            "algorithm": {"trainer_type": "policy_gradient"},
             "trainer": {
                 "device": "mlu",
                 "logger": ["file"],
-                "use_v1": True,
+                "use_v1": False,
                 "resume_mode": "disable",
                 "total_training_steps": 50,
-                "v1": {"trainer_mode": "sync", "sync": {"parameter_sync_step": 1}},
             },
             "actor_rollout_ref": {
                 "actor": {"fsdp_config": {"full_determinism": True, "seed": 42}, "ppo_epochs": 1},
@@ -186,6 +186,35 @@ def test_runtime_env_accepts_matching_ray_value(api, runtime_case):
     """An explicit identical seed is compatible with the startup environment."""
     runtime_case.config.ray_kwargs.ray_init.runtime_env.env_vars.VERL_SEED = "42"
     assert api.policy.runtime_env(runtime_case.config)["env_vars"] == runtime_case.environment
+
+
+def test_runtime_env_accepts_v0_without_v1_configuration(api, runtime_case):
+    """The historical V0 route does not depend on TransferQueue or V1 sync settings."""
+    runtime_case.config.trainer.use_v1 = False
+    assert "v1" not in runtime_case.config.trainer
+    assert api.policy.runtime_env(runtime_case.config)["env_vars"] == runtime_case.environment
+
+
+def test_runtime_env_rejects_v0_separate_topology(api, runtime_case):
+    """Changing Actor/rollout placement would change the historical comparison contract."""
+    runtime_case.config.trainer.use_v1 = False
+    runtime_case.config.actor_rollout_ref.separate = True
+    with pytest.raises(ValueError, match="colocated"):
+        api.policy.runtime_env(runtime_case.config)
+
+
+def test_runtime_env_accepts_bounded_two_step_acceptance(api, runtime_case):
+    """A separate two-step run can end before the fresh longrun is authorized."""
+    runtime_case.config.trainer.use_v1 = False
+    runtime_case.config.trainer.total_training_steps = 2
+    assert api.policy.runtime_env(runtime_case.config)["env_vars"] == runtime_case.environment
+
+
+def test_runtime_env_rejects_unplanned_training_length(api, runtime_case):
+    """Do not silently change the comparison window through a launcher override."""
+    runtime_case.config.trainer.total_training_steps = 3
+    with pytest.raises(ValueError, match="2-step.*50-step"):
+        api.policy.runtime_env(runtime_case.config)
 
 
 def test_runtime_env_rejects_each_mismatched_seed_before_artifacts(api, runtime_case):

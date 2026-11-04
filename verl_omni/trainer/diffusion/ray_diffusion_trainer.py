@@ -54,6 +54,7 @@ from verl.utils.py_functional import rename_dict
 from verl.utils.skip import SkipManager
 from verl.utils.tracking import ValidationGenerationsLogger
 
+from verl_omni.pipelines.experiment_hooks import invoke_experiment
 from verl_omni.pipelines.rollout_media import (
     previews_from_batch,
     resolve_batch_media_kind,
@@ -569,6 +570,8 @@ class BaseRayDiffusionTrainer(ABC):
         except (KeyError, TypeError, AttributeError, OmegaConf.errors.OmegaConfBaseException) as e:
             raise RuntimeError("Failed to propagate trainer.total_training_steps to actor optimizer config.") from e
 
+        invoke_experiment("prepare_data", self.config, self.train_dataset, self.val_dataset)
+
     def _dump_generations(
         self,
         inputs,
@@ -784,6 +787,7 @@ class BaseRayDiffusionTrainer(ABC):
             ]
             sample_gts.extend(ground_truths)
 
+            invoke_experiment("prepare_v0_validation_batch", test_batch)
             test_gen_batch = self._get_gen_batch(test_batch)
             test_gen_batch.meta_info = {
                 "recompute_log_prob": False,
@@ -840,6 +844,9 @@ class BaseRayDiffusionTrainer(ABC):
             reward_tensor, reward_extra_info = extract_reward(test_batch)
 
             scores = reward_tensor.sum(-1).cpu().tolist()
+            invoke_experiment(
+                "record_evaluation", self.config, self.global_steps, test_batch, scores, reward_extra_info
+            )
             sample_scores.extend(scores)
 
             reward_extra_infos_dict["reward"].extend(scores)
@@ -1171,6 +1178,7 @@ class BaseRayDiffusionTrainer(ABC):
         )
         with open(local_latest_checkpointed_iteration, "w") as f:
             f.write(str(self.global_steps))
+        invoke_experiment("snapshot_checkpoint", self.config, self.global_steps, actor_local_path)
 
     def _load_checkpoint(self):
         if self.config.trainer.resume_mode == "disable":
@@ -1235,6 +1243,7 @@ class BaseRayDiffusionTrainer(ABC):
         batch_td = _to_diffusion_worker_tensordict(batch)
         # step 2: convert from padding to no-padding
         batch_td = embeds_padding_2_no_padding(batch_td)
+        tu.assign_non_tensor_data(batch_td, "global_steps", self.global_steps)
         ppo_mini_batch_size = self.config.actor_rollout_ref.actor.ppo_mini_batch_size
         ppo_mini_batch_size = ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
         ppo_epochs = self.config.actor_rollout_ref.actor.ppo_epochs
@@ -1383,6 +1392,7 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
         # load checkpoint and update weights before doing anything
         self._load_checkpoint()
         self.checkpoint_manager.update_weights(self.global_steps)
+        invoke_experiment("snapshot_initial", self.config, self.global_steps)
 
         current_epoch = self.global_steps // len(self.train_dataloader)
 
@@ -1429,6 +1439,7 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
                         else curr_step_profile
                     )
 
+                invoke_experiment("record_input_batch", self.config, batch_dict, self.global_steps)
                 batch: DataProto = DataProto.from_single_dict(batch_dict)
 
                 # add uid to batch
@@ -1489,6 +1500,7 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
 
                         # extract reward_tensor and reward_extra_infos_dict for training
                         reward_tensor, reward_extra_infos_dict = extract_reward(batch)
+                        invoke_experiment("record_training_candidates", self.config, self.global_steps, batch)
 
                     # Bypass mode: skip old_log_prob recompute (2 policies).
                     # Decoupled mode: recompute old_log_probs as proximal anchor (3 policies).

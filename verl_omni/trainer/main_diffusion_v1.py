@@ -23,7 +23,6 @@ from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
 from verl.utils.device import auto_set_device, is_cuda_available
 from verl.utils.import_utils import load_class_from_fqn
 
-from verl_omni.pipelines.experiment_hooks import invoke_experiment
 from verl_omni.utils.config import validate_config
 from verl_omni.utils.diffusion_attention import validate_attention_consistency
 from verl_omni.utils.rl_insight import enable_rl_insight
@@ -67,7 +66,6 @@ def run_diffusion_v1(config, task_runner_class=None) -> None:
     # TRANSFER_QUEUE_ENABLE is exported to every worker through the runtime env.
     config.transfer_queue.enable = True
     enable_rl_insight(config)
-    experiment_env = invoke_experiment("runtime_env", config)
 
     if not ray.is_initialized():
         default_runtime_env = get_ppo_ray_runtime_env()
@@ -77,8 +75,6 @@ def run_diffusion_v1(config, task_runner_class=None) -> None:
         # Merge into a fresh config: user-provided `env_vars` arrive in struct mode and
         # reject new keys, so writing into them would crash any override such as OMP_NUM_THREADS.
         runtime_env = OmegaConf.merge(default_runtime_env, runtime_env_kwargs)
-        if experiment_env is not None:
-            runtime_env = OmegaConf.merge(runtime_env, experiment_env)
         if config.transfer_queue.enable:
             runtime_env = OmegaConf.merge(runtime_env, {"env_vars": {"TRANSFER_QUEUE_ENABLE": "1"}})
         ray_init_kwargs = OmegaConf.create({**ray_init_kwargs, "runtime_env": runtime_env})

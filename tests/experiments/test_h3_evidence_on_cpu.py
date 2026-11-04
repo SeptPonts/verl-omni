@@ -141,10 +141,11 @@ def case(api, tmp_path, monkeypatch):
                 "model": {"lora_adapter_path": str(tmp_path / "converted")},
             },
             "trainer": {
+                "use_v1": False,
+                "total_training_steps": 1,
                 "resume_mode": "disable",
                 "resume_from_path": None,
                 "default_local_dir": str(tmp_path / "hongshan"),
-                "v1": {"trainer_mode": "sync", "sampler": {"drop_incomplete_groups": False}},
             },
         }
     )
@@ -208,7 +209,7 @@ def test_prepare_data_uses_shared_manifests_and_resume_never_recreates_them(api,
     monkeypatch.setattr(training_api, "create_h3_training_manifest", training)
     monkeypatch.setattr(api.evidence, "create_h3_evaluation_manifest", evaluation)
     api.evidence.prepare_data(case.config, case.train_dataset, case.val_dataset)
-    training.assert_called_once_with(case.config, case.train_dataset, case.config.data.train_files)
+    training.assert_called_once_with(case.config, case.train_dataset, case.config.data.train_files, num_steps=1)
     assert json.loads((case.run / "manifests/training.json").read_text()) == case.training
     assert json.loads((case.run / "manifests/evaluation.json").read_text()) == case.evaluation
     case.config.trainer.resume_mode = "resume_path"
