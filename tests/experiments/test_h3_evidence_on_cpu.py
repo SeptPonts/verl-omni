@@ -393,6 +393,16 @@ def test_only_post_log_save_steps_trigger_retention(api, case, step):
         api.retain.assert_not_called()
 
 
+@pytest.mark.parametrize("error", [ValueError("file metadata changed"), OSError("audit read failed")])
+def test_retention_audit_failure_does_not_interrupt_training(api, case, caplog, error):
+    """Auxiliary audit errors remain visible without failing a completed training step."""
+    api.retain.side_effect = error
+    api.evidence.complete_step(case.config, 10)
+    api.retain.assert_called_once()
+    assert "keeping checkpoints and continuing training" in caplog.text
+    assert str(error) in caplog.text
+
+
 @pytest.mark.parametrize("logging_fails", [False, True])
 def test_native_v0_log_failure_prevents_post_step_retention(api, case, logging_fails):
     """Execute the native log/callback boundary and preserve the old checkpoint if logging raises."""

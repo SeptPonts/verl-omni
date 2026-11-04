@@ -20,6 +20,7 @@ receipts describe files, not live model loading or completed training.
 """
 
 import json
+import logging
 import math
 import os
 import shutil
@@ -279,12 +280,19 @@ def record_evaluation(config, global_step, data, scores, reward_extra_info):
 
 
 def complete_step(config, global_step):
-    """Retain saved checkpoints only after validation media and the step's scalar logging complete."""
+    """Audit retention after logging; an audit failure keeps checkpoints and training running."""
     if global_step > 0 and global_step % config.trainer.save_freq == 0:
-        from verl_omni.experiments.h3_checkpoint_retention import audit_and_retain_checkpoint
-
         actor = Path(config.trainer.default_local_dir) / f"global_step_{global_step}" / "actor"
-        audit_and_retain_checkpoint(config, global_step, actor)
+        try:
+            from verl_omni.experiments.h3_checkpoint_retention import audit_and_retain_checkpoint
+
+            audit_and_retain_checkpoint(config, global_step, actor)
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "H3 retention audit failed at step %s; keeping checkpoints and continuing training: %s",
+                global_step,
+                actor,
+            )
 
 
 def snapshot_destination(config, global_step):
