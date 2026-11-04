@@ -15,7 +15,7 @@
 
 Run manifests authenticate source inputs. Attempt ledgers record observed rows,
 request seeds and rewards before balancing or queue cleanup. Adapter snapshots
-live alongside full checkpoints, independently of their retention policy; their
+live on the run evidence volume, independently of checkpoint retention; their
 receipts describe files, not live model loading or completed training.
 """
 
@@ -278,19 +278,23 @@ def record_evaluation(config, global_step, data, scores, reward_extra_info):
     write_ledger(Path(os.environ["H3_ATTEMPT_DIR"]) / f"evaluation-{global_step}.jsonl", records)
 
 
+def complete_step(config, global_step):
+    """Retain saved checkpoints only after validation media and the step's scalar logging complete."""
+    if global_step > 0 and global_step % config.trainer.save_freq == 0:
+        from verl_omni.experiments.h3_checkpoint_retention import audit_and_retain_checkpoint
+
+        actor = Path(config.trainer.default_local_dir) / f"global_step_{global_step}" / "actor"
+        audit_and_retain_checkpoint(config, global_step, actor)
+
+
 def snapshot_destination(config, global_step):
-    """Keep attempt-specific adapter weights beside checkpoints, outside the run evidence volume."""
+    """Keep attempt-specific adapter weights on the run evidence volume, outside checkpoint storage."""
     if type(global_step) is not int or global_step < 0:
         raise H3EvidenceContractError("H3 snapshot step must be a nonnegative integer")
     attempt = Path(os.environ["H3_ATTEMPT_DIR"]).resolve().name
-    output = (
-        Path(config.trainer.default_local_dir).expanduser().resolve()
-        / "lora-snapshots"
-        / attempt
-        / f"step{global_step}"
-    )
-    if output.is_relative_to(Path(os.environ["H3_RUN_DIR"]).expanduser().resolve()):
-        raise H3EvidenceContractError("H3 LoRA snapshots must be on default_local_dir storage, outside H3_RUN_DIR")
+    output = Path(os.environ["H3_RUN_DIR"]).expanduser().resolve() / "lora-snapshots" / attempt / f"step{global_step}"
+    if output.is_relative_to(Path(config.trainer.default_local_dir).expanduser().resolve()):
+        raise H3EvidenceContractError("H3 LoRA snapshots must stay on run evidence storage, outside checkpoint storage")
     if output.exists():
         raise FileExistsError(output)
     return output

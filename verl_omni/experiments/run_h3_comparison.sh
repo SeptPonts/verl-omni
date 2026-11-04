@@ -7,7 +7,7 @@ set -euo pipefail
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 repo_root=$(cd "$script_dir/../.." && pwd)
 export MODEL_PATH ACTOR_CONFIG_PATH DATA_DIR CLAP_MODEL_PATH IMAGEBIND_MODEL_PATH H3_RUNTIME_PATCH_RECEIPT
-export OUTPUT_DIR="$H3_RUN_DIR" NUM_GPUS=8 TOTAL_TRAINING_STEPS="${H3_TRAINING_STEPS:-50}"
+export OUTPUT_DIR="$H3_RUN_DIR" NUM_GPUS=8 TOTAL_TRAINING_STEPS=50
 export ACTOR_SP=1 ROLLOUT_TP=2 TEXT_ENCODER_TP=2
 export WANDB_MODE="${WANDB_MODE:-offline}"
 
@@ -56,7 +56,7 @@ exec bash "$launcher" \
     actor_rollout_ref.rollout.val_kwargs.n=1 +actor_rollout_ref.rollout.val_kwargs.seed=42 \
     actor_rollout_ref.rollout.algo.sde_window_seed=42 \
     trainer.resume_mode=disable trainer.val_before_train=true trainer.test_freq=10 trainer.save_freq=10 \
-    trainer.max_actor_ckpt_to_keep=5 "trainer.default_local_dir=$H3_CHECKPOINT_DIR" 'trainer.logger=[console,file,wandb]' \
+    trainer.max_actor_ckpt_to_keep=null "trainer.default_local_dir=$H3_CHECKPOINT_DIR" 'trainer.logger=[console,file,wandb]' \
     "+ray_kwargs.ray_init.runtime_env.env_vars.WANDB_DIR=$WANDB_DIR" \
     "+ray_kwargs.ray_init.runtime_env.env_vars.WANDB_MODE=$WANDB_MODE" \
     global_profiler.tool=null global_profiler.steps=null \

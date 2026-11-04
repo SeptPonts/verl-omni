@@ -134,6 +134,10 @@ def runtime_case(api, monkeypatch, tmp_path):
                 "use_v1": False,
                 "resume_mode": "disable",
                 "total_training_steps": 50,
+                "max_actor_ckpt_to_keep": None,
+                "save_freq": 10,
+                "test_freq": 10,
+                "val_before_train": True,
             },
             "actor_rollout_ref": {
                 "actor": {"fsdp_config": {"full_determinism": True, "seed": 42}, "ppo_epochs": 1},
@@ -203,17 +207,33 @@ def test_runtime_env_rejects_v0_separate_topology(api, runtime_case):
         api.policy.runtime_env(runtime_case.config)
 
 
-def test_runtime_env_accepts_bounded_two_step_acceptance(api, runtime_case):
-    """A separate two-step run can end before the fresh longrun is authorized."""
+def test_runtime_env_rejects_cancelled_two_step_run(api, runtime_case):
+    """The approved recipe runs fifty steps directly without an independent short run."""
     runtime_case.config.trainer.use_v1 = False
     runtime_case.config.trainer.total_training_steps = 2
-    assert api.policy.runtime_env(runtime_case.config)["env_vars"] == runtime_case.environment
+    with pytest.raises(ValueError, match="50-step"):
+        api.policy.runtime_env(runtime_case.config)
 
 
 def test_runtime_env_rejects_unplanned_training_length(api, runtime_case):
     """Do not silently change the comparison window through a launcher override."""
     runtime_case.config.trainer.total_training_steps = 3
-    with pytest.raises(ValueError, match="2-step.*50-step"):
+    with pytest.raises(ValueError, match="50-step"):
+        api.policy.runtime_env(runtime_case.config)
+
+
+@pytest.mark.parametrize("keep", [1, 5])
+def test_runtime_env_rejects_native_premature_pruning(api, runtime_case, keep):
+    """The Actor save must not delete a checkpoint before trainer data.pt is complete."""
+    runtime_case.config.trainer.max_actor_ckpt_to_keep = keep
+    with pytest.raises(ValueError, match="native checkpoint pruning"):
+        api.policy.runtime_env(runtime_case.config)
+
+
+def test_runtime_env_rejects_async_checkpoint_save(api, runtime_case):
+    """Post-save CPU validation requires all rank saves to have returned."""
+    runtime_case.config.actor_rollout_ref.actor.checkpoint = {"async_save": True}
+    with pytest.raises(ValueError, match="synchronous"):
         api.policy.runtime_env(runtime_case.config)
 
 

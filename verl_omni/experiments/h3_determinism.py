@@ -27,6 +27,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from verl_omni.experiments.h3_evidence import (  # noqa: F401 -- provider lifecycle exports
+    complete_step,
     prepare_data,
     record_evaluation,
     record_input_batch,
@@ -54,6 +55,7 @@ ENVIRONMENT_NAMES = (
     "H3_DETERMINISTIC_DEVICE",
     "H3_RUN_DIR",
     "H3_ATTEMPT_DIR",
+    "H3_CHECKPOINT_DIR",
     "H3_RUNTIME_PATCH_RECEIPT",
     "H3_FA4_HUB_REVISION",
     "H3_TRAINING_MANIFEST",
@@ -74,6 +76,9 @@ ENVIRONMENT_NAMES = (
     "VERL_CLAP_BATCH_SIZE",
     "VERL_OPTIMIZER_UPDATE_TRACE_DIR",
     "VERL_FILE_LOGGER_PATH",
+    "WANDB_DIR",
+    "WANDB_ENTITY",
+    "WANDB_MODE",
     "CNCL_TUNER_PLUGIN",
     "CNCL_TUNER_CONFIG_FILE",
     "HF_HOME",
@@ -110,8 +115,14 @@ def runtime_env(config):
     if config.actor_rollout_ref.actor.fsdp_config.seed != 42 or config.actor_rollout_ref.rollout.seed != 42:
         raise ValueError("Actor, rollout, reward and worker seeds must all be 42")
     validate_runtime_callback()
-    if config.trainer.total_training_steps not in (2, 50) or config.data.seed != 30:
-        raise ValueError("Use an independent 2-step acceptance or a fresh 50-step longrun, with data.seed=30")
+    if config.trainer.total_training_steps != 50 or config.data.seed != 30:
+        raise ValueError("Use the approved fresh 50-step longrun with data.seed=30")
+    if config.trainer.max_actor_ckpt_to_keep is not None or config.trainer.get("remove_previous_ckpt_in_save", False):
+        raise ValueError("Disable native checkpoint pruning; retain only after full-state, LoRA and evaluation audits")
+    if OmegaConf.select(config, "actor_rollout_ref.actor.checkpoint.async_save", default=False):
+        raise ValueError("The complete-state checkpoint audit requires synchronous saves")
+    if config.trainer.save_freq != 10 or config.trainer.test_freq != 10 or not config.trainer.val_before_train:
+        raise ValueError("Keep eval0 and paired checkpoint/evaluation at every 10 steps")
     if config.actor_rollout_ref.actor.ppo_epochs != 1:
         raise ValueError("The longrun update identities require one PPO epoch")
     if config.data.val_batch_size not in (None, 128) or config.data.val_max_samples != 128:
@@ -244,6 +255,7 @@ def configure_compute_process(role, seed, *, seeded=False):
         convolution.deterministic = True
         kernels = {}
     elif is_cuda_available:
+        backend.matmul.allow_bf16_reduced_precision_reduction = True
         convolution = torch.backends.cudnn
         convolution.enabled = False
         convolution.allow_tf32 = False
@@ -275,6 +287,8 @@ def configure_compute_process(role, seed, *, seeded=False):
     }
     if device == "mlu":
         state["custom_allow_tf32"] = torch.backends.mlu.custom.allow_tf32
+    else:
+        state["bf16_reduced_precision_reduction"] = backend.matmul.allow_bf16_reduced_precision_reduction
     directory = Path(os.environ["H3_ATTEMPT_DIR"]) / "determinism"
     directory.mkdir(parents=True, exist_ok=True)
     (directory / f"{os.getpid()}-{role}.json").write_text(json.dumps(state, indent=2) + "\n")

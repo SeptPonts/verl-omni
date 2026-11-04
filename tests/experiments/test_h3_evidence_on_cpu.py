@@ -13,6 +13,7 @@
 # limitations under the License.
 """Verify source-authenticated H3 ledgers and native snapshot delegation on CPU."""
 
+import ast
 import importlib
 import importlib.util
 import json
@@ -45,9 +46,14 @@ def api(monkeypatch):
     reward.extract_reward = Mock()
     monkeypatch.setitem(sys.modules, reward.__name__, reward)
     evidence = importlib.import_module("verl_omni.experiments.h3_evidence")
+    retention = ModuleType("verl_omni.experiments.h3_checkpoint_retention")
+    retention.audit_and_retain_checkpoint = Mock()
+    monkeypatch.setitem(sys.modules, retention.__name__, retention)
     monkeypatch.setattr(evidence, "TRAINING_MANIFEST", None)
     monkeypatch.setattr(evidence, "EVALUATION_MANIFEST", None)
-    yield SimpleNamespace(evidence=evidence, extract_reward=reward.extract_reward)
+    yield SimpleNamespace(
+        evidence=evidence, extract_reward=reward.extract_reward, retain=retention.audit_and_retain_checkpoint
+    )
     for name in set(sys.modules) - before:
         if name.startswith("verl_omni."):
             sys.modules.pop(name, None)
@@ -106,6 +112,7 @@ def test_evidence_import_does_not_initialize_agent_loop_or_training_manifest(api
         "prepare_data",
         "record_input_batch",
         "record_evaluation",
+        "complete_step",
         "record_training_candidates",
         "record_sampling_request",
         "snapshot_initial",
@@ -146,6 +153,7 @@ def case(api, tmp_path, monkeypatch):
                 "resume_mode": "disable",
                 "resume_from_path": None,
                 "default_local_dir": str(tmp_path / "hongshan"),
+                "save_freq": 10,
             },
         }
     )
@@ -360,6 +368,7 @@ def test_evaluation_keeps_all_128_original_ids_actual_seeds_and_components(api, 
     """Authenticate the full fixed set and serialize NumPy values without reducing or dropping components."""
     api.evidence.record_evaluation(case.config, 10, evaluation.data, evaluation.scores, evaluation.columns)
     records = read_ledger(case.attempt / "evaluation-10.jsonl")
+    api.retain.assert_not_called()
     assert len(records) == 128
     for index, record in enumerate(records):
         assert record["sample_id"] == case.evaluation["samples"][index]["sample_id"]
@@ -370,6 +379,66 @@ def test_evaluation_keeps_all_128_original_ids_actual_seeds_and_components(api, 
         assert record["total"] == evaluation.scores[index]
     with pytest.raises(FileExistsError):
         api.evidence.record_evaluation(case.config, 10, evaluation.data, evaluation.scores, evaluation.columns)
+
+
+@pytest.mark.parametrize("step", [0, 1, 9, 10, 20, 50])
+def test_only_post_log_save_steps_trigger_retention(api, case, step):
+    """The score callback never prunes; the completed-step callback audits only save/eval points."""
+    api.evidence.complete_step(case.config, step)
+    if step > 0 and step % 10 == 0:
+        api.retain.assert_called_once_with(
+            case.config, step, Path(case.config.trainer.default_local_dir) / f"global_step_{step}/actor"
+        )
+    else:
+        api.retain.assert_not_called()
+
+
+@pytest.mark.parametrize("logging_fails", [False, True])
+def test_native_v0_log_failure_prevents_post_step_retention(api, case, logging_fails):
+    """Execute the native log/callback boundary and preserve the old checkpoint if logging raises."""
+    tree = ast.parse((ROOT / "verl_omni/trainer/diffusion/ray_diffusion_trainer.py").read_text())
+    trainer = next(
+        node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "PolicyGradientRayTrainer"
+    )
+    fit = next(node for node in trainer.body if isinstance(node, ast.FunctionDef) and node.name == "fit")
+    boundary = []
+    for node in ast.walk(fit):
+        if not isinstance(node, ast.Expr) or not isinstance(node.value, ast.Call):
+            continue
+        call = node.value
+        if isinstance(call.func, ast.Attribute) and isinstance(call.func.value, ast.Name):
+            if call.func.value.id == "logger" and any(
+                keyword.arg == "data" and isinstance(keyword.value, ast.Name) and keyword.value.id == "metrics"
+                for keyword in call.keywords
+            ):
+                boundary.append(node)
+        elif isinstance(call.func, ast.Name) and call.func.id == "invoke_experiment":
+            if call.args and isinstance(call.args[0], ast.Constant) and call.args[0].value == "complete_step":
+                boundary.append(node)
+    assert len(boundary) == 2
+    program = compile(
+        ast.Module(body=sorted(boundary, key=lambda node: node.lineno), type_ignores=[]), "V0-log-boundary", "exec"
+    )
+    logger = SimpleNamespace(log=Mock(side_effect=RuntimeError("logging failed") if logging_fails else None))
+
+    def invoke(event, config, step):
+        """Dispatch the real completed-step handler after the native logger returns."""
+        assert event == "complete_step"
+        api.evidence.complete_step(config, step)
+
+    namespace = {
+        "logger": logger,
+        "metrics": {},
+        "self": SimpleNamespace(config=case.config, global_steps=10),
+        "invoke_experiment": invoke,
+    }
+    if logging_fails:
+        with pytest.raises(RuntimeError, match="logging failed"):
+            exec(program, namespace)
+        api.retain.assert_not_called()
+    else:
+        exec(program, namespace)
+        api.retain.assert_called_once()
 
 
 @pytest.mark.parametrize(
@@ -449,9 +518,9 @@ def adapters(api, case, tmp_path, monkeypatch):
 
 
 def test_fresh_snapshot_copies_converted_weights_config_receipt_and_actual_metadata(api, case, adapters):
-    """Keep step0 on checkpoint storage, authenticate all tensors and skip unrelated backbone files."""
+    """Keep step0 on run evidence storage, authenticate all tensors and skip unrelated backbone files."""
     receipt = api.evidence.snapshot_initial(case.config, 0)
-    output = Path(case.config.trainer.default_local_dir) / "lora-snapshots/fresh-one/step0"
+    output = case.run / "lora-snapshots/fresh-one/step0"
     assert set(path.name for path in output.iterdir()) == {
         "pytorch_lora_weights.safetensors",
         "adapter_config.json",
@@ -479,8 +548,8 @@ def test_saved_and_resumed_snapshots_delegate_to_native_export_and_keep_actual_s
     second = api.evidence.snapshot_initial(case.config, 20)
     assert [call.args[0] for call in adapters.native.call_args_list] == [actor10, actor20]
     assert [call.args[1] for call in adapters.native.call_args_list] == [
-        root / "lora-snapshots/fresh-one/step10",
-        root / "lora-snapshots/fresh-one/step20",
+        case.run / "lora-snapshots/fresh-one/step10",
+        case.run / "lora-snapshots/fresh-one/step20",
     ]
     for step, receipt in ((10, first), (20, second)):
         assert receipt["global_step"] == step and receipt["source_format"] == "native-peft"
@@ -488,14 +557,16 @@ def test_saved_and_resumed_snapshots_delegate_to_native_export_and_keep_actual_s
         output = Path(receipt["output"])
         assert set(path.name for path in output.iterdir()) == {"adapter_config.json", "adapter_model.safetensors"}
         assert len(load_file(output / "adapter_model.safetensors")) == 624
-    assert not (root / "lora-snapshots/fresh-one/step0").exists()
+    assert not (case.run / "lora-snapshots/fresh-one/step0").exists()
 
 
 @pytest.mark.parametrize(
     "problem",
     ["step_mismatch", "missing_sampler", "missing_actor", "fresh_nonzero", "resume_zero", "auto", "run_storage"],
 )
-def test_snapshot_rejects_invalid_resume_or_storage_without_canonical_fallback(api, case, adapters, problem):
+def test_snapshot_rejects_invalid_resume_or_storage_without_canonical_fallback(
+    api, case, adapters, problem, monkeypatch
+):
     """A missing actual checkpoint cannot become a seemingly valid canonical eval20 snapshot."""
     root = Path(case.config.trainer.default_local_dir)
     checkpoint = root / "global_step_20"
@@ -517,7 +588,7 @@ def test_snapshot_rejects_invalid_resume_or_storage_without_canonical_fallback(a
     elif problem == "auto":
         case.config.trainer.resume_mode = "auto"
     else:
-        case.config.trainer.default_local_dir = str(case.run / "forbidden")
+        monkeypatch.setenv("H3_RUN_DIR", str(root))
     with pytest.raises(api.evidence.H3EvidenceContractError):
         api.evidence.snapshot_initial(case.config, step)
     adapters.native.assert_not_called()

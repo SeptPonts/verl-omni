@@ -1656,6 +1656,7 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
                 metrics["train/nonfinite_grad_steps"] = self._nonfinite_grad_streak
 
                 logger.log(data=metrics, step=self.global_steps)
+                invoke_experiment("complete_step", self.config, self.global_steps)
 
                 progress_bar.update(1)
                 self.global_steps += 1
