@@ -20,6 +20,7 @@ import torch
 from peft import LoraConfig
 from verl.utils.py_functional import convert_to_regular_types
 
+from verl_omni.pipelines.experiment_hooks import invoke_experiment
 from verl_omni.utils.config import resolve_lora_config
 
 logger = logging.getLogger(__name__)
@@ -41,7 +42,8 @@ class LoRAAdapterMixin:
             local_adapter_path = copy_to_local(lora_adapter_path, use_shm=self.model_config.use_shm)
 
             # diffusers auto-names an unnamed first adapter "default_0"; name it explicitly.
-            module.load_lora_adapter(local_adapter_path, adapter_name=primary_adapter)
+            loader_kwargs = invoke_experiment("lora_loader_kwargs", self.model_config)
+            module.load_lora_adapter(local_adapter_path, adapter_name=primary_adapter, **(loader_kwargs or {}))
             peft_config = getattr(module, "peft_config", {}).get(primary_adapter, None)
             for adapter_name in extra_adapters:
                 if peft_config is not None and adapter_name not in getattr(module, "peft_config", {}):
@@ -79,6 +81,7 @@ class LoRAAdapterMixin:
                 if isinstance(submodule, BaseTunerLayer):
                     submodule.cast_input_dtype_enabled = False
 
+        invoke_experiment("adapter_loaded", module, self.model_config)
         return module
 
     @contextmanager

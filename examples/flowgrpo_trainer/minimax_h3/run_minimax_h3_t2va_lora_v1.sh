@@ -62,8 +62,8 @@ exec > >(tee -a "$log_file") 2>&1
 h3_lora_targets="['to_q','to_k','to_v','to_out.0','ff.net.0.proj','ff.net.2']"
 
 python3 -m verl_omni.trainer.main_diffusion_v1 \
-    data.train_files=$train_path \
-    data.val_files=$test_path \
+    "data.train_files=$train_path" \
+    "data.val_files=$test_path" \
     data.train_batch_size=32 \
     data.val_max_samples=128 \
     data.max_prompt_length=1024 \
@@ -71,8 +71,8 @@ python3 -m verl_omni.trainer.main_diffusion_v1 \
     data.seed=42 \
     algorithm.adv_estimator=flow_grpo \
     algorithm.global_std=True \
-    actor_rollout_ref.model.path=$MODEL_PATH \
-    actor_rollout_ref.model.config_path=$ACTOR_CONFIG_PATH \
+    "actor_rollout_ref.model.path=$MODEL_PATH" \
+    "actor_rollout_ref.model.config_path=$ACTOR_CONFIG_PATH" \
     actor_rollout_ref.model.algorithm=flow_grpo \
     actor_rollout_ref.model.transformer_subfolder=transformer \
     actor_rollout_ref.model.attn_backend=_flash_3_varlen_hub \

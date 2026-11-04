@@ -146,8 +146,46 @@ def test_canonicalize_passthrough_for_singleton_batches():
     assert list(ordered.keys) == ["only_0_0"]
 
 
+def test_tq_read_and_write_preserve_prompt_order_when_uuid_order_disagrees(monkeypatch):
+    """Materialization and writeback must not undo the caller's canonical row ownership."""
+    meta = KVBatchMeta(
+        partition_id="train",
+        keys=["aaa_1_0", "zzz_0_0", "aaa_0_0", "zzz_1_0"],
+        tags=[
+            {"gen_batch_seq": 0, "prompt_index": 1},
+            {"gen_batch_seq": 0, "prompt_index": 0},
+            {"gen_batch_seq": 0, "prompt_index": 1},
+            {"gen_batch_seq": 0, "prompt_index": 0},
+        ],
+    )
+    ordered = tq_utils.canonicalize_diffusion_tq_meta(meta)
+    expected_keys = ["zzz_0_0", "zzz_1_0", "aaa_0_0", "aaa_1_0"]
+    values = {key: index for index, key in enumerate(expected_keys)}
+    captured = {}
+
+    def read_rows(*, keys, partition_id, select_fields):
+        """Return values in the requested key order, matching the TQ contract."""
+        captured["read"] = list(keys)
+        return {"row_value": torch.tensor([[values[key]] for key in keys])}
+
+    def write_rows(*, keys, partition_id, fields):
+        """Capture the key/value pairing that the trainer writes back."""
+        captured["write"] = list(keys)
+        captured["values"] = fields["row_value"].tolist()
+
+    monkeypatch.setattr(tq_utils.tq, "kv_batch_get", read_rows)
+    monkeypatch.setattr(tq_utils.tq, "kv_batch_put", write_rows)
+    data = tq_utils.diffusion_tq_batch_to_dataproto(ordered)
+    assert data.batch["row_value"].tolist() == [[0], [1], [2], [3]]
+    tq_utils.put_dataproto_fields_to_tq(ordered, data, ["row_value"])
+    assert captured == {"read": expected_keys, "write": expected_keys, "values": [[0], [1], [2], [3]]}
+
+
 def test_fetch_one_gen_batch_stamps_monotonic_gen_batch_seq():
+    """Keep generation identities stable with the trainer's lifecycle context present."""
     trainer = SimpleNamespace(
+        config=SimpleNamespace(),
+        global_steps=1,
         train_dataloader_it=iter(
             [
                 {"raw_prompt": np.array(["p0", "p1"], dtype=object)},

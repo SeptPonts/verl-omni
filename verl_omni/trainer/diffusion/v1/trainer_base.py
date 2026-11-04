@@ -60,6 +60,7 @@ from verl.utils.py_functional import rename_dict
 from verl.utils.skip import SkipManager
 from verl.utils.tracking import Tracking, ValidationGenerationsLogger
 
+from verl_omni.pipelines.experiment_hooks import invoke_experiment
 from verl_omni.pipelines.rollout_media import (
     MediaArtifact,
     previews_from_batch,
@@ -602,6 +603,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         if self._is_direct_preference:
             return self._train_direct_preference_batch(metrics, timing_raw, batch_meta, data)
 
+        invoke_experiment("record_training_candidates", self.config, self.global_steps, data)
         data = self._balance_batch(data, metrics=metrics)
 
         # Bypass mode: skip old_log_prob recompute (2 policies).
@@ -980,6 +982,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         if self.config.trainer.total_training_steps is not None:
             total_training_steps = self.config.trainer.total_training_steps
         self.total_training_steps = total_training_steps
+        invoke_experiment("prepare_data", self.config, self.train_dataset, self.val_dataset)
         logger.info(f"Total diffusion training steps: {self.total_training_steps}")
 
         try:
@@ -1209,6 +1212,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             self.train_dataloader_it = iter(self.train_dataloader)
             batch_dict = next(self.train_dataloader_it)
 
+        invoke_experiment("record_input_batch", self.config, batch_dict, self.global_steps)
         batch_dict["uid"] = np.array([str(uuid.uuid4()) for _ in range(len(batch_dict["raw_prompt"]))], dtype=object)
         batch_dict["index"] = np.arange(len(batch_dict["raw_prompt"]))
         batch_dict["gen_batch_seq"] = np.full(len(batch_dict["raw_prompt"]), self._gen_batch_seq)
@@ -1548,6 +1552,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             shuffle = False
         tu.assign_non_tensor(
             batch_td,
+            global_steps=self.global_steps,
             global_batch_size=ppo_mini_batch_size,
             mini_batch_size=ppo_mini_batch_size,
             epochs=ppo_epochs,
@@ -1651,6 +1656,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
 
             reward_tensor, reward_extra_info = extract_reward(data)
             scores = reward_tensor.sum(-1).cpu().tolist()
+            invoke_experiment("record_evaluation", self.config, self.global_steps, data, scores, reward_extra_info)
             sample_scores.extend(scores)
             reward_extra_infos_dict["reward"].extend(scores)
             for key, values in reward_extra_info.items():
@@ -1998,6 +2004,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         latest = os.path.join(self.config.trainer.default_local_dir, "latest_checkpointed_iteration.txt")
         with open(latest, "w") as f:
             f.write(str(self.global_steps))
+        invoke_experiment("snapshot_checkpoint", self.config, self.global_steps, actor_local_path)
 
     def _load_checkpoint(self):
         self.global_steps = 0

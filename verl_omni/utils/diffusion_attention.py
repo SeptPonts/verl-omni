@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""FA2/FA3 availability checks and validation for matched actor/rollout attention."""
+"""FA availability checks and validation for matched actor/rollout attention."""
 
 from __future__ import annotations
 
@@ -23,12 +23,13 @@ logger = logging.getLogger(__name__)
 
 ACTOR_FA2_BACKEND = "flash_varlen_hub"
 ACTOR_FA3_BACKEND = "_flash_3_varlen_hub"
+ACTOR_FA4_BACKEND = "flash_4_hub"
 ACTOR_NATIVE_BACKEND = "native"
 ROLLOUT_SDPA_BACKEND = "TORCH_SDPA"
 
 # Keep in sync with vllm-omni diffusion attention backends for FA train/rollout pairs.
 FA_ROLLOUT_BACKENDS = ("FLASH_ATTN", "FLASH_ATTN_HUB", "FLASH_ATTN_3_HUB")
-ACTOR_BACKENDS = (ACTOR_FA2_BACKEND, ACTOR_FA3_BACKEND, ACTOR_NATIVE_BACKEND, "_native_npu")
+ACTOR_BACKENDS = (ACTOR_FA2_BACKEND, ACTOR_FA3_BACKEND, ACTOR_FA4_BACKEND, ACTOR_NATIVE_BACKEND, "_native_npu")
 ROLLOUT_BACKENDS = FA_ROLLOUT_BACKENDS + (ROLLOUT_SDPA_BACKEND,)
 
 
@@ -51,6 +52,16 @@ def _cuda_supports_rollout_fa() -> bool:
 
 def rollout_fa_available() -> bool:
     """True when local FA packages can back ``FLASH_ATTN`` rollout."""
+    try:
+        import torch
+
+        if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 10:
+            # FA2/FA3 packages can import on Blackwell without providing runnable kernels.
+            from flash_attn.cute import flash_attn_func, flash_attn_varlen_func  # noqa: F401
+
+            return True
+    except Exception:
+        return False
     if not _cuda_supports_rollout_fa():
         return False
     for module_name in ("fa3_fwd_interface", "flash_attn"):
@@ -73,6 +84,7 @@ def validate_attention_consistency(config: Any) -> None:
           ``FLASH_ATTN_3_HUB`` for kernels FA3 train/rollout consistency).
         - If ``attn_backend`` is ``native`` or ``_native_npu``, rollout must be
           ``TORCH_SDPA``.
+        - Explicit ``flash_4_hub`` (FA4) requires local ``FLASH_ATTN`` rollout.
 
     Raises:
         ValueError: If the rollout attention backend does not match the training
@@ -99,6 +111,8 @@ def validate_attention_consistency(config: Any) -> None:
         if rollout_backend in FA_ROLLOUT_BACKENDS:
             return
         expected = ", ".join(FA_ROLLOUT_BACKENDS)
+    elif attn_backend == ACTOR_FA4_BACKEND:
+        expected = "FLASH_ATTN"
     elif attn_backend in (ACTOR_NATIVE_BACKEND, "_native_npu"):
         expected = ROLLOUT_SDPA_BACKEND
     if rollout_backend != expected:

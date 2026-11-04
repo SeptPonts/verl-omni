@@ -39,7 +39,9 @@ else:
 
 _CLAP_SAMPLE_RATE = 48_000
 _DEFAULT_MODEL = "laion/larger_clap_general"
-_MAX_BATCH_SIZE = 16
+_MAX_BATCH_SIZE = int(os.getenv("VERL_CLAP_BATCH_SIZE", "16"))
+if _MAX_BATCH_SIZE < 1:
+    raise ValueError("VERL_CLAP_BATCH_SIZE must be a positive integer.")
 _MODEL_CACHE = {}
 _MODEL_LOCK = threading.Lock()
 _BATCHING_STATE = threading.local()

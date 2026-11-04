@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Optional
 
 import torch
@@ -72,6 +73,14 @@ def _shared_layout(value: torch.Tensor, length: int, name: str) -> torch.Tensor:
 @DiffusionModelBase.register("MiniMaxH3Pipeline", algorithm="flow_grpo")
 class MiniMaxH3FlowGRPO(DiffusionModelBase):
     """Replay flattened joint video/audio transitions with the H3 DiT."""
+
+    @classmethod
+    def build_module(cls, model_config: DiffusionModelConfig, torch_dtype: torch.dtype):
+        """Apply an opted-in compute policy at the existing device-bound model-build hook."""
+        from verl_omni.pipelines.experiment_hooks import invoke_experiment
+
+        invoke_experiment("configure_compute_process", "actor", os.environ.get("VERL_SEED"), seeded=True)
+        return None
 
     @classmethod
     def prepare_processor_files(cls, model_path: str) -> str:

@@ -198,12 +198,16 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
         **kwargs,
     ) -> _InternalDiffusionAgentLoopOutput:
         """Run one diffusion agent loop session; the TQ write is batched per prompt."""
-        return await super()._run_agent_loop(
+        result = await super()._run_agent_loop(
             sampling_params,
             agent_name=agent_name,
             validate=trajectory["validate"] if trajectory else False,
             **kwargs,
         )
+        from verl_omni.pipelines.experiment_hooks import invoke_experiment
+
+        invoke_experiment("record_sampling_request", result, sampling_params, session_id, kwargs)
+        return result
 
     async def _write_trajectories_to_tq(
         self,
@@ -263,6 +267,7 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
             for media_key in (
                 "media_kind",
                 "audio_sample_rate",
+                "experiment_sampling",
                 ARTIFACT_SPECS,
                 PRIMARY_ARTIFACT,
                 PREVIEW_ARTIFACT,

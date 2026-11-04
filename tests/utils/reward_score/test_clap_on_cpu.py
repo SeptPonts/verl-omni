@@ -18,6 +18,7 @@ import sys
 import threading
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 import torch
@@ -249,6 +250,51 @@ async def test_consumer_caps_each_micro_batch(monkeypatch):
 
     assert [len(prompts) for prompts, _ in processor.batches] == [2, 2, 1]
     assert len(results) == 5
+
+
+@pytest.mark.parametrize("batch_env, expected_sizes", [(None, [16, 1]), ("1", [1] * 17), ("2", [2] * 8 + [1])])
+@pytest.mark.asyncio
+async def test_batch_size_env_controls_actual_model_calls(monkeypatch, batch_env, expected_sizes):
+    """Exercise env parsing, the queue and model calls while preserving row scores."""
+    if batch_env is None:
+        monkeypatch.delenv("VERL_CLAP_BATCH_SIZE", raising=False)
+    else:
+        monkeypatch.setenv("VERL_CLAP_BATCH_SIZE", batch_env)
+    scorer = _load_scorer_module()
+    monkeypatch.setattr(sys.modules[__name__], "clap", scorer)
+    _install_fake_torchaudio(monkeypatch)
+    processor = _FakeProcessor()
+    model = MagicMock(wraps=_FakeModel())
+    monkeypatch.setattr(scorer, "_load_clap", lambda model_name_or_path, device: (model, processor))
+    state = _reset_consumer(monkeypatch)
+    assert state.queue.maxsize == (16 if batch_env is None else int(batch_env))
+
+    prompts = ["right" if index % 2 == 0 else "up" for index in range(17)]
+    try:
+        results = await asyncio.gather(
+            *(_score(prompt, [1.0, float(index + 1)]) for index, prompt in enumerate(prompts))
+        )
+    finally:
+        await _stop_consumer(state)
+
+    assert [call.kwargs["audio_values"].shape[0] for call in model.call_args_list] == expected_sizes
+    assert [call.kwargs["text_values"].shape[0] for call in model.call_args_list] == expected_sizes
+    assert [prompt for batch_prompts, _ in processor.batches for prompt in batch_prompts] == prompts
+    expected_scores = [
+        (1.0 if prompt == "right" else index + 1) / (1.0 + (index + 1) ** 2) ** 0.5
+        for index, prompt in enumerate(prompts)
+    ]
+    assert [result["score"] for result in results] == pytest.approx(expected_scores)
+    assert [result["source_sample_rate"] for result in results] == [48_000] * 17
+
+
+@pytest.mark.parametrize("batch_env", ["0", "-1", "", "invalid", "1.5"])
+def test_batch_size_env_rejects_nonpositive_or_noninteger_values(monkeypatch, batch_env):
+    """Reject external config that would disable the queue bound or fail integer parsing."""
+    monkeypatch.setenv("VERL_CLAP_BATCH_SIZE", batch_env)
+    with pytest.raises(RuntimeError) as error:
+        _load_scorer_module()
+    assert isinstance(error.value.__cause__, ValueError)
 
 
 @pytest.mark.asyncio

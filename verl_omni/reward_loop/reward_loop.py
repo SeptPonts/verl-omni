@@ -77,6 +77,9 @@ class OmniRewardLoopWorker(RewardLoopWorker):
         super().__init__(config, reward_router_address)
 
     def _init_reward_fn(self):
+        from verl_omni.pipelines.experiment_hooks import invoke_experiment
+
+        invoke_experiment("configure_reward_process", self.config)
         super()._init_reward_fn()
         if hasattr(self.reward_manager, "set_reward_executors"):
             self.reward_manager.set_reward_executors(

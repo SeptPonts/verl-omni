@@ -67,6 +67,7 @@ from verl_omni.utils.mfu import (
     allgather_diffusion_flops_meta,
     collect_diffusion_flops_meta,
 )
+from verl_omni.utils.optimizer_update_trace import append_optimizer_update_trace
 from verl_omni.workers.config import (
     DiffusionActorConfig,
     DiffusionModelConfig,
@@ -380,6 +381,20 @@ class TrainingWorker(Worker, DistProfilerExtension):
             )
             mini_batch_size_per_gpu = mini_batch_size // self.engine.get_data_parallel_size()
 
+        trace_dir = os.environ.get("VERL_OPTIMIZER_UPDATE_TRACE_DIR")
+        if trace_dir:
+            global_steps = tu.get(data, "global_steps")
+            if type(global_steps) is not int:
+                raise ValueError("Optimizer update tracing requires integer non-tensor global_steps from the trainer")
+            trace_rank = torch.distributed.get_rank()
+            trace_dp_group = self.engine.get_data_parallel_group()
+            # Match _postprocess_output: a None group means local loss, not WORLD.
+            trace_dp_source_rank = (
+                min(torch.distributed.get_process_group_ranks(trace_dp_group))
+                if trace_dp_group is not None
+                else trace_rank
+            )
+
         # make iterator
         dataloader = tu.make_iterator(
             data,
@@ -420,6 +435,17 @@ class TrainingWorker(Worker, DistProfilerExtension):
                 )
                 with torch.profiler.record_function(f"mini_batch{batch_idx}"):
                     actor_output = self.train_batch(mini_batch_td)
+                if trace_dir and actor_output is not None:
+                    append_optimizer_update_trace(
+                        trace_dir,
+                        global_steps=global_steps,
+                        batch_idx=batch_idx,
+                        rank=trace_rank,
+                        dp_rank=self.engine.get_data_parallel_rank(),
+                        dp_size=self.engine.get_data_parallel_size(),
+                        dp_source_rank=trace_dp_source_rank,
+                        metrics=tu.get(actor_output, "metrics"),
+                    )
                 self.profiler.step()
                 output_lst.append(actor_output)
 
