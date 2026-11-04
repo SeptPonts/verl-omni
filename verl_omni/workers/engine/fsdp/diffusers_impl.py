@@ -307,6 +307,11 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
             # under init_empty_weights. from_config reads only the config JSON.
             if init_context is init_empty_weights:
                 module = AutoModel.from_config(load_path, **load_kwargs)
+                # Match from_pretrained's BF16/FP32 layout before FSDP materializes meta ranks.
+                keep_in_fp32 = module._keep_in_fp32_modules or ()
+                for name, parameter in module.named_parameters():
+                    dtype = torch.float32 if any(part in keep_in_fp32 for part in name.split(".")) else torch_dtype
+                    parameter.data = parameter.data.to(dtype)
             else:
                 module = AutoModel.from_pretrained(load_path, torch_dtype=torch_dtype, **load_kwargs)
             try:
