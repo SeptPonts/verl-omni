@@ -121,8 +121,8 @@ def runtime_env(config):
         raise ValueError("Disable native checkpoint pruning; retain only after full-state, LoRA and evaluation audits")
     if OmegaConf.select(config, "actor_rollout_ref.actor.checkpoint.async_save", default=False):
         raise ValueError("The complete-state checkpoint audit requires synchronous saves")
-    if config.trainer.save_freq != 10 or config.trainer.test_freq != 10 or not config.trainer.val_before_train:
-        raise ValueError("Keep eval0 and paired checkpoint/evaluation at every 10 steps")
+    if config.trainer.save_freq != 10 or config.trainer.test_freq != 10:
+        raise ValueError("Keep paired checkpoint/evaluation at every 10 steps")
     if config.actor_rollout_ref.actor.ppo_epochs != 1:
         raise ValueError("The longrun update identities require one PPO epoch")
     if config.data.val_batch_size not in (None, 128) or config.data.val_max_samples != 128:

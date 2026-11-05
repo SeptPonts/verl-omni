@@ -151,8 +151,10 @@ def runtime_case(api, monkeypatch, tmp_path):
     return SimpleNamespace(config=config, environment=environment, ray=ray, root=tmp_path / "run/attempt-001")
 
 
-def test_runtime_env_allowlist_and_driver_never_initializes_devices(api, runtime_case, monkeypatch):
+@pytest.mark.parametrize("val_before_train", [False, True])
+def test_runtime_env_allowlist_and_driver_never_initializes_devices(api, runtime_case, monkeypatch, val_before_train):
     """Driver startup exports only allowed values without importing compute APIs."""
+    runtime_case.config.trainer.val_before_train = val_before_train
     monkeypatch.setenv("H3_UNLISTED_POLICY_SETTING", "unlisted")
     monkeypatch.setenv("UNRELATED_PRIVATE_TOKEN", "do-not-forward")
     compute = Mock(side_effect=AssertionError("driver configured a compute device"))
